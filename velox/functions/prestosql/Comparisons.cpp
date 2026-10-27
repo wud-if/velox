@@ -82,6 +82,13 @@ struct SimdComparator {
     bool isSimdizable = (lhs.isConstantEncoding() || lhs.isFlatEncoding()) &&
         (rhs.isConstantEncoding() || rhs.isFlatEncoding()) &&
         rows.isAllSelected();
+#if defined(__aarch64__)
+    // SIMD comparison crashes on misaligned raw buffers on aarch64
+    // (NEON requires 16-byte alignment; Arrow-converted buffers don't
+    // guarantee it). Fall back to the scalar path until the alignment
+    // is fixed upstream.
+    isSimdizable = false;
+#endif
 
     static const bool isTypeNotSupported =
         std::is_same_v<T, int128_t> || std::is_floating_point_v<T>;

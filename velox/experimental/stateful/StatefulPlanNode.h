@@ -252,11 +252,6 @@ class StreamJoinNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   const std::vector<core::PlanNodePtr>& sources() const override {
     return sources_;
   }
@@ -348,11 +343,6 @@ class EmptyNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   const std::vector<core::PlanNodePtr>& sources() const override;
 
   std::string_view name() const override {
@@ -381,7 +371,6 @@ class StreamWindowJoinNode : public core::PlanNode {
       const std::shared_ptr<const core::NestedLoopJoinNode>& probe,
       RowTypePtr outputType,
       int numPartitions,
-      core::JoinType joinType,
       int leftWindowEndIndex,
       int rightWindowEndIndex)
       : core::PlanNode(id),
@@ -391,17 +380,11 @@ class StreamWindowJoinNode : public core::PlanNode {
         probe_(std::move(probe)),
         outputType_(std::move(outputType)),
         numPartitions_(numPartitions),
-        joinType_(joinType),
         leftWindowEndIndex_(leftWindowEndIndex),
         rightWindowEndIndex_(rightWindowEndIndex) {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
-  }
-
-  core::JoinType joinType() const {
-    return joinType_;
-  }
   }
 
   const std::vector<core::PlanNodePtr>& sources() const override {
@@ -451,7 +434,6 @@ class StreamWindowJoinNode : public core::PlanNode {
   const std::shared_ptr<const core::NestedLoopJoinNode> probe_;
   const RowTypePtr outputType_;
   const int numPartitions_;
-  const core::JoinType joinType_;
   const int leftWindowEndIndex_;
   const int rightWindowEndIndex_;
 };
@@ -497,11 +479,6 @@ class StreamWindowAggregationNode : public core::PlanNode {
 
   const RowTypePtr& outputType() const override {
     return outputType_;
-  }
-
-  core::JoinType joinType() const {
-    return joinType_;
-  }
   }
 
   const std::shared_ptr<const core::AggregationNode>& aggregation() const {
@@ -609,11 +586,6 @@ class GroupWindowAggsHandlerNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   std::string_view name() const override {
     return "GroupWindowAggsHandler";
   }
@@ -657,11 +629,6 @@ class GroupWindowAggregationNode : public core::PlanNode {
 
   const RowTypePtr& outputType() const override {
     return outputType_;
-  }
-
-  core::JoinType joinType() const {
-    return joinType_;
-  }
   }
 
   const std::shared_ptr<const GroupWindowAggsHandlerNode>& aggregation() const {
@@ -738,11 +705,6 @@ class StreamRankNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   const std::vector<core::PlanNodePtr>& sources() const override;
 
   std::string_view name() const override {
@@ -790,11 +752,6 @@ class DeduplicateNode : public core::PlanNode {
 
   const RowTypePtr& outputType() const override {
     return outputType_;
-  }
-
-  core::JoinType joinType() const {
-    return joinType_;
-  }
   }
 
   const std::vector<core::PlanNodePtr>& sources() const override;
@@ -861,11 +818,6 @@ class StreamTopNNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   const std::vector<core::PlanNodePtr>& sources() const override;
 
   std::string_view name() const override {
@@ -925,11 +877,6 @@ class GroupAggsHandlerNode : public core::PlanNode {
     return outputType_;
   }
 
-  core::JoinType joinType() const {
-    return joinType_;
-  }
-  }
-
   bool generateUpdateBefore() const {
     return generateUpdateBefore_;
   }
@@ -970,11 +917,6 @@ class GroupAggregationNode : public core::PlanNode {
 
   const RowTypePtr& outputType() const override {
     return outputType_;
-  }
-
-  core::JoinType joinType() const {
-    return joinType_;
-  }
   }
 
   const std::shared_ptr<const GroupAggsHandlerNode>& aggregation() const {

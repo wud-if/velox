@@ -349,6 +349,12 @@ template <typename A, typename B>
 bool shouldApplyAutoSimdComparison(
     const SelectivityVector& rows,
     std::vector<VectorPtr>& args) {
+#if defined(__aarch64__)
+  // SIMD comparison crashes on misaligned raw buffers on aarch64 (NEON
+  // requires 16-byte alignment). Fall back to the scalar path everywhere
+  // until the alignment is fixed upstream.
+  return false;
+#endif
   if (rows.end() - rows.begin() > 64) {
     if ((args[0]->isFlatEncoding() || args[0]->isConstantEncoding()) &&
         (args[1]->isFlatEncoding() || args[1]->isConstantEncoding())) {

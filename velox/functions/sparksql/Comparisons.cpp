@@ -41,6 +41,23 @@ class ComparisonFunction final : public exec::VectorFunction {
     const Cmp cmp;
     context.ensureWritable(rows, BOOLEAN(), result);
     result->clearNulls(rows);
+
+#if defined(__aarch64__)
+    // On aarch64, SIMD comparison and raw pointer fast paths can crash on
+    // misaligned buffers (NEON requires 16-byte alignment). Always decode.
+    {
+      auto* flatResult = result->asUnchecked<FlatVector<bool>>();
+      exec::DecodedArgs decodedArgs(rows, args, context);
+      auto decodedA = decodedArgs.at(0);
+      auto decodedB = decodedArgs.at(1);
+      rows.applyToSelected([&](vector_size_t i) {
+        flatResult->set(
+            i, cmp(decodedA->valueAt<T>(i), decodedB->valueAt<T>(i)));
+      });
+      return;
+    }
+#endif
+
     if constexpr (
         kind == TypeKind::TINYINT || kind == TypeKind::SMALLINT ||
         kind == TypeKind::INTEGER || kind == TypeKind::BIGINT) {
