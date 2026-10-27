@@ -159,6 +159,38 @@ void WindowJoin::processData(
   }
 }
 
+// Reads window-end values from either a BIGINT or a TIMESTAMP(3) column
+// (Flink window TVF emits window_end as TIMESTAMP(3)). Returns nullptr when
+// the column type is unsupported.
+class WindowEndReader {
+ public:
+  explicit WindowEndReader(const VectorPtr& child) : child_(child) {
+    if (auto* ts = child_->as<SimpleVector<Timestamp>>()) {
+      isTimestamp_ = true;
+    } else if (child_->as<SimpleVector<int64_t>>() != nullptr) {
+      isTimestamp_ = false;
+    } else {
+      valid_ = false;
+    }
+  }
+
+  bool valid() const {
+    return valid_;
+  }
+
+  int64_t valueAt(vector_size_t i) const {
+    if (isTimestamp_) {
+      return child_->as<SimpleVector<Timestamp>>()->valueAt(i).toMillis();
+    }
+    return child_->as<SimpleVector<int64_t>>()->valueAt(i);
+  }
+
+ private:
+  VectorPtr child_;
+  bool isTimestamp_ = false;
+  bool valid_ = true;
+};
+
 RowVectorPtr WindowJoin::filterWindowFiredRows(
     RowVectorPtr& input, int windowEndIndex) {
   if (!input || input->size() == 0) {
@@ -171,9 +203,8 @@ RowVectorPtr WindowJoin::filterWindowFiredRows(
   if (watermark < 0) {
     return input;
   }
-  auto windowEnds = input->childAt(windowEndIndex)
-                        ->as<SimpleVector<int64_t>>();
-  if (!windowEnds) {
+  WindowEndReader windowEnds(input->childAt(windowEndIndex));
+  if (!windowEnds.valid()) {
     return input;  // Can't filter; pass through.
   }
   int n = input->size();
@@ -181,7 +212,7 @@ RowVectorPtr WindowJoin::filterWindowFiredRows(
   // Fast path: all rows belong to unfired windows.
   bool allFuture = true;
   for (int i = 0; i < n; i++) {
-    if (windowEnds->valueAt(i) <= watermark) {
+    if (windowEnds.valueAt(i) <= watermark) {
       allFuture = false;
       break;
     }
@@ -194,7 +225,7 @@ RowVectorPtr WindowJoin::filterWindowFiredRows(
   std::vector<vector_size_t> kept;
   kept.reserve(n);
   for (int i = 0; i < n; i++) {
-    if (windowEnds->valueAt(i) > watermark) {
+    if (windowEnds.valueAt(i) > watermark) {
       kept.push_back(i);
     }
   }
@@ -214,24 +245,24 @@ std::map<int64_t, RowVectorPtr> WindowJoin::partitionWindowData(
                  << " out of range [0, " << input->childrenSize() << ")";
     return {};
   }
-  auto windowEndChild = input->childAt(windowEndIndex);
   // KeySelector::partition wraps children in DictionaryVector; use
-  // SimpleVector's valueAt() interface which works across encodings.
-  auto windowEnds = windowEndChild->as<SimpleVector<int64_t>>();
-  if (!windowEnds) {
+  // SimpleVector's valueAt() interface which works across encodings. The
+  // window-end column may be BIGINT or TIMESTAMP(3).
+  WindowEndReader windowEnds(input->childAt(windowEndIndex));
+  if (!windowEnds.valid()) {
     LOG(WARNING) << "WindowJoin: windowEnd column kind="
-                 << static_cast<int>(windowEndChild->typeKind())
-                 << " is not SimpleVector<int64_t>";
+                 << static_cast<int>(input->childAt(windowEndIndex)->typeKind())
+                 << " is neither BIGINT nor TIMESTAMP";
     return {};
   }
   int n = input->size();
 
   // Fast path: all rows share the same windowEnd (most common — the upstream
   // window aggregate emits per-window batches).
-  int64_t first = windowEnds->valueAt(0);
+  int64_t first = windowEnds.valueAt(0);
   bool allSame = true;
   for (int i = 1; i < n; i++) {
-    if (windowEnds->valueAt(i) != first) {
+    if (windowEnds.valueAt(i) != first) {
       allSame = false;
       break;
     }
@@ -243,7 +274,7 @@ std::map<int64_t, RowVectorPtr> WindowJoin::partitionWindowData(
   // Slow path: rows span multiple windows; group by windowEnd.
   std::map<int64_t, std::vector<vector_size_t>> groups;
   for (int i = 0; i < n; i++) {
-    groups[windowEnds->valueAt(i)].push_back(i);
+    groups[windowEnds.valueAt(i)].push_back(i);
   }
 
   std::map<int64_t, RowVectorPtr> result;
