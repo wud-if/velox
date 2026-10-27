@@ -116,8 +116,17 @@ void WindowAggregator::advance() {
       } else {
         // the assigned slice hasn't been triggered, accumulate into the
         // assigned slice
-        std::lock_guard<std::mutex> lock(*mtx_);
-        windowBuffer_->addElement(key, sliceEnd, windowData);
+        {
+          std::lock_guard<std::mutex> lock(*mtx_);
+          windowBuffer_->addElement(key, sliceEnd, windowData);
+        }
+        // Register the window fire timer so the accumulated window is
+        // emitted once the watermark passes the window end. For tumble
+        // windows the slice end is the window end. Note: this must run
+        // outside the mtx_ scope because the timer service locks the same
+        // mutex.
+        windowTimerService_->registerEventTimeTimer(
+            key, sliceEnd, sliceEnd - 1);
       }
     }
   }
@@ -250,7 +259,8 @@ void WindowAggregator::fireWindow(
     LOG(INFO) << "No output found for key: " << key
               << ", window end: " << windowEnd;
     return;
-  } else {
+  }
+  {
     if (windowStartIndex_ >= 0) {
       output = addWindowTimestampToOutput(
           output,

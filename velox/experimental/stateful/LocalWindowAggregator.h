@@ -44,6 +44,7 @@ class LocalWindowAggregator : public StatefulOperator {
   void close() override;
 
   void processWatermark(int64_t timestamp) override {
+    StatefulOperator::processWatermark(timestamp);
     processWatermarkInternal(timestamp);
   }
 

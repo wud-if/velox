@@ -62,7 +62,8 @@ class WindowAggregator : public StatefulOperator,
   }
 
   void processWatermark(int64_t timestamp) override {
-    // processWatermarkInternal(timestamp);
+    StatefulOperator::processWatermark(timestamp);
+    processWatermarkInternal(timestamp);
   }
 
   void onEventTime(

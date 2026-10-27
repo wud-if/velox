@@ -56,6 +56,12 @@ void LocalWindowAggregator::advance() {
         sliceAssigner_->assignSliceEnd(data);
     for (const auto& [sliceEnd, data] : sliceEndToData) {
       // TODO: addElement may have data output.
+      if (TimeWindowUtil::isWindowFired(
+              sliceEnd, currentWatermark_, shiftTimeZone_)) {
+        // The slice has already been triggered: the element is late and
+        // the slice output has been emitted, so drop it (Flink semantics).
+        continue;
+      }
       auto windowData = data;
       windowBuffer_->addElement(key, sliceEnd, windowData);
     }
