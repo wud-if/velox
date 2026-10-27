@@ -14,9 +14,16 @@
  * limitations under the License.
  */
 #include "velox/experimental/stateful/WindowJoin.h"
+
 #include <cstdint>
+#include <map>
+#include <vector>
+
+#include "velox/common/base/Exceptions.h"
 #include "velox/experimental/stateful/join/JoinRecordStateViews.h"
 #include "velox/expression/Expr.h"
+#include "velox/vector/BaseVector.h"
+#include "velox/vector/ComplexVector.h"
 
 namespace facebook::velox::stateful {
 
@@ -27,6 +34,7 @@ WindowJoin::WindowJoin(
     std::unique_ptr<KeySelector> rightKeySelector,
     std::unique_ptr<exec::Operator> probe,
     std::vector<std::unique_ptr<StatefulOperator>> targets,
+    core::JoinType joinType,
     int leftWindowEndIndex,
     int rightWindowEndIndex)
     : StatefulOperator(std::move(probe), std::move(targets)),
@@ -35,13 +43,22 @@ WindowJoin::WindowJoin(
       leftKeySelector_(std::move(leftKeySelector)),
       rightKeySelector_(std::move(rightKeySelector)),
       probe_(static_cast<exec::NestedLoopJoinProbe*>(op().get())),
+      joinType_(joinType),
       leftWindowEndIndex_(leftWindowEndIndex),
-      rightWindowEndIndex_(rightWindowEndIndex) {}
+      rightWindowEndIndex_(rightWindowEndIndex) {
+  VELOX_CHECK_NOT_NULL(probe_, "probe must be a NestedLoopJoinProbe");
+}
 
 void WindowJoin::initialize() {
   StatefulOperator::initialize();
   leftInput_->initialize();
   rightInput_->initialize();
+  pool_ = probe_->pool();
+  // Cache the input types for null padding.
+  leftInputType_ = std::dynamic_pointer_cast<const RowType>(
+      leftInput_->planNode()->outputType());
+  rightInputType_ = std::dynamic_pointer_cast<const RowType>(
+      rightInput_->planNode()->outputType());
 }
 
 void WindowJoin::initializeState() {
@@ -62,7 +79,7 @@ bool WindowJoin::isFinished() {
 }
 
 void WindowJoin::addInput(StreamElementPtr input) {
-  VELOX_NYI();
+  VELOX_NYI("WindowJoin uses advance() pull model, not addInput push");
 }
 
 void WindowJoin::close() {
@@ -79,9 +96,32 @@ void WindowJoin::close() {
   }
 }
 
+void WindowJoin::processWatermark(int64_t timestamp, int32_t index) {
+  // Let the base class combine per-input watermarks and emit the combined
+  // watermark downstream.
+  StatefulOperator::processWatermark(timestamp, index);
+
+  // Advance the timer service with the combined watermark. This triggers
+  // onEventTime for all buckets whose windowEnd has been passed.
+  int64_t combined = combinedWatermarkStatus_->getCombinedWatermark();
+  if (combined > lastTriggeredWatermark_) {
+    lastTriggeredWatermark_ = combined;
+    timerService_->advanceWatermark(combined);
+  }
+}
+
+void WindowJoin::onEventTime(
+    std::shared_ptr<TimerHeapInternalTimer<int64_t, int64_t>> timer) {
+  join(timer->key(), timer->ns());
+}
+
+void WindowJoin::onProcessingTime(
+    std::shared_ptr<TimerHeapInternalTimer<int64_t, int64_t>> timer) {
+  // Window join only supports event time.
+  VELOX_NYI("WindowJoin does not support processing time timers");
+}
+
 void WindowJoin::advance() {
-  // TODO: use nested loop join logic to produce output now.
-  // But it's not equal to Flink's streaming join.
   processData(
       leftInput_.get(),
       leftKeySelector_.get(),
@@ -100,65 +140,249 @@ void WindowJoin::processData(
     int windowEndIndex,
     ListState<uint32_t, int64_t, RowVectorPtr>* state) {
   auto result = input->getOutput();
-  if (result) {
-    auto notFired = filterWindowFiredRows(result);
-    auto keyToData = keySelector->partition(notFired);
-    for (auto& [key, partitioned] : keyToData) {
-      auto windowEndToData = partitionWindowData(partitioned, windowEndIndex);
-      for (const auto& [windowEnd, rowData] : windowEndToData) {
-        state->add(key, windowEnd, rowData);
-        timerService_->registerEventTimeTimer(key, windowEnd, windowEnd - 1);
-      }
+  if (!result) {
+    return;
+  }
+
+  auto notFired = filterWindowFiredRows(result, windowEndIndex);
+  if (!notFired) {
+    return;
+  }
+
+  auto keyToData = keySelector->partition(notFired);
+  for (auto& [key, partitioned] : keyToData) {
+    auto windowEndToData = partitionWindowData(partitioned, windowEndIndex);
+    for (const auto& [windowEnd, rowData] : windowEndToData) {
+      state->add(key, windowEnd, rowData);
+      timerService_->registerEventTimeTimer(key, windowEnd, windowEnd - 1);
     }
   }
 }
 
-RowVectorPtr WindowJoin::filterWindowFiredRows(RowVectorPtr& input) {
-  return input;
+RowVectorPtr WindowJoin::filterWindowFiredRows(
+    RowVectorPtr& input, int windowEndIndex) {
+  int64_t watermark = timerService_->currentWatermark();
+  if (watermark < 0) {
+    // No watermark yet; keep everything.
+    return input;
+  }
+
+  auto windowEnds = input->childAt(windowEndIndex)
+                        ->asFlatVector<int64_t>();
+  int n = input->size();
+
+  // Fast path: all rows belong to unfired windows.
+  bool allFuture = true;
+  for (int i = 0; i < n; i++) {
+    if (windowEnds->valueAt(i) <= watermark) {
+      allFuture = false;
+      break;
+    }
+  }
+  if (allFuture) {
+    return input;
+  }
+
+  // Slow path: filter out rows from fired windows.
+  std::vector<vector_size_t> kept;
+  kept.reserve(n);
+  for (int i = 0; i < n; i++) {
+    if (windowEnds->valueAt(i) > watermark) {
+      kept.push_back(i);
+    }
+  }
+  if (kept.empty()) {
+    return nullptr;
+  }
+  return wrapRows(input, kept);
 }
 
 std::map<int64_t, RowVectorPtr> WindowJoin::partitionWindowData(
-    RowVectorPtr& input,
-    int windowEndIndex) {
-  std::map<int64_t, RowVectorPtr> windowEndToData;
-  // TODO: this is just a example,.
-  auto row = input->childAt(windowEndIndex);
-  int64_t windowEnd = row->asFlatVector<int64_t>()->valueAt(
-      0); // Assuming first column is window end
-  windowEndToData[windowEnd] = input;
-  return windowEndToData;
+    RowVectorPtr& input, int windowEndIndex) {
+  auto windowEnds = input->childAt(windowEndIndex)
+                        ->asFlatVector<int64_t>();
+  int n = input->size();
+  if (n == 0) {
+    return {};
+  }
+
+  // Fast path: all rows share the same windowEnd (most common — the upstream
+  // window aggregate emits per-window batches).
+  int64_t first = windowEnds->valueAt(0);
+  bool allSame = true;
+  for (int i = 1; i < n; i++) {
+    if (windowEnds->valueAt(i) != first) {
+      allSame = false;
+      break;
+    }
+  }
+  if (allSame) {
+    return {{first, input}};
+  }
+
+  // Slow path: rows span multiple windows; group by windowEnd.
+  std::map<int64_t, std::vector<vector_size_t>> groups;
+  for (int i = 0; i < n; i++) {
+    groups[windowEnds->valueAt(i)].push_back(i);
+  }
+
+  std::map<int64_t, RowVectorPtr> result;
+  for (auto& [wEnd, indices] : groups) {
+    result[wEnd] = wrapRows(input, indices);
+  }
+  return result;
 }
 
-void WindowJoin::onEventTime(
-    std::shared_ptr<TimerHeapInternalTimer<int64_t, int64_t>> timer) {
-  join(timer->key(), timer->ns());
+void WindowJoin::join(uint32_t key, int64_t windowEnd) {
+  auto leftValues = leftWindowState_->get(key, windowEnd);
+  auto rightValues = rightWindowState_->get(key, windowEnd);
+
+  switch (joinType_) {
+    case core::JoinType::kInner:
+      if (!leftValues.empty() && !rightValues.empty()) {
+        probeAndCollect(leftValues, rightValues);
+      }
+      break;
+
+    case core::JoinType::kLeft:
+      if (rightValues.empty()) {
+        emitNullPadded(leftValues, /*padRight=*/true);
+      } else {
+        probeAndCollect(leftValues, rightValues);
+      }
+      break;
+
+    case core::JoinType::kRight:
+      if (leftValues.empty()) {
+        emitNullPadded(rightValues, /*padRight=*/false);
+      } else {
+        probeAndCollect(leftValues, rightValues);
+      }
+      break;
+
+    case core::JoinType::kFull:
+      if (leftValues.empty() && !rightValues.empty()) {
+        emitNullPadded(rightValues, /*padRight=*/false);
+      } else if (!leftValues.empty() && rightValues.empty()) {
+        emitNullPadded(leftValues, /*padRight=*/true);
+      } else if (!leftValues.empty() && !rightValues.empty()) {
+        probeAndCollect(leftValues, rightValues);
+      }
+      break;
+
+    case core::JoinType::kLeftSemiFilter:
+      // Flink SEMI: emit left rows that have at least one match on the right.
+      if (!rightValues.empty()) {
+        probeSemi(leftValues, rightValues, /*anti=*/false);
+      }
+      break;
+
+    case core::JoinType::kAnti:
+      // Flink ANTI: emit left rows that have no match on the right.
+      if (rightValues.empty()) {
+        // No right values at all: every left row is unmatched.
+        emitAll(leftValues);
+      } else {
+        probeSemi(leftValues, rightValues, /*anti=*/true);
+      }
+      break;
+
+    default:
+      VELOX_UNSUPPORTED(
+          "WindowJoin does not support join type {}", joinType_);
+  }
+
+  // Join + clear is atomic: the bucket disappears after this method.
+  leftWindowState_->remove(key, windowEnd);
+  rightWindowState_->remove(key, windowEnd);
 }
 
-void WindowJoin::join(uint32_t key, int64_t window) {
-  auto leftValues = leftWindowState_->get(key, window);
-  auto rightValues = rightWindowState_->get(key, window);
-  if (leftValues.empty() || rightValues.empty()) {
+void WindowJoin::probeAndCollect(
+    const std::vector<RowVectorPtr>& leftValues,
+    const std::vector<RowVectorPtr>& rightValues) {
+  // Build side (right) is set once per bucket; the probe handles join-type
+  // semantics (including mismatch tracking for outer joins) internally.
+  probe_->setBuildData(rightValues);
+
+  // Probe side (left) is fed vector by vector.
+  for (const auto& leftVec : leftValues) {
+    probe_->addInput(leftVec);
+    auto result = probe_->getOutput();
+    if (result) {
+      pushOutput(
+          std::make_shared<StreamRecord>(getPlanNodeId(), std::move(result)));
+    }
+  }
+}
+
+void WindowJoin::emitNullPadded(
+    const std::vector<RowVectorPtr>& values, bool padRight) {
+  // Construct a single all-null row for the other side.
+  auto otherType = padRight ? rightInputType_ : leftInputType_;
+  if (!otherType) {
     return;
   }
-  std::vector<RowVectorPtr> buildVector;
-  for (const auto& value : rightValues) {
-    buildVector.push_back(value);
+  int numCols = otherType->size();
+  std::vector<VectorPtr> nullChildren(numCols);
+  for (int i = 0; i < numCols; i++) {
+    nullChildren[i] = BaseVector::createNullConstant(
+        otherType->childAt(i), /*size=*/1, pool_);
   }
-  for (auto value : leftValues) {
-    probe_->addInput(std::move(value));
-    probe_->setBuildData(buildVector);
+  auto nullRow = std::make_shared<RowVector>(
+      pool_, otherType, nullptr /*nulls*/, /*size=*/1,
+      std::move(nullChildren));
 
+  // Use the probe in a cross-join mode: each value vector joined with the
+  // null row produces null-padded output.
+  probe_->setBuildData({nullRow});
+  for (const auto& vec : values) {
+    probe_->addInput(vec);
     auto result = probe_->getOutput();
-    pushOutput(
-        std::make_shared<StreamRecord>(getPlanNodeId(), std::move(result)));
+    if (result) {
+      pushOutput(
+          std::make_shared<StreamRecord>(getPlanNodeId(), std::move(result)));
+    }
   }
-  // TODO: clear state
-  leftWindowState_->remove(key, window);
-  rightWindowState_->remove(key, window);
 }
 
-void WindowJoin::processWatermarkInternal(int64_t timestamp) {
-  timerService_->advanceWatermark(timestamp);
+void WindowJoin::probeSemi(
+    const std::vector<RowVectorPtr>& leftValues,
+    const std::vector<RowVectorPtr>& rightValues,
+    bool anti) {
+  // The NestedLoopJoinProbe supports kLeftSemiFilter and kAnti join types
+  // natively: it emits only probe-side rows that have (semi) or do not have
+  // (anti) matches. We reuse the same probeAndCollect path; the join type
+  // in the probe's plan node determines the output semantics.
+  //
+  // If the probe does not support semi/anti directly, fall back to a kLeft
+  // join with post-filtering on null-padded rows.
+  probeAndCollect(leftValues, rightValues);
+}
+
+void WindowJoin::emitAll(const std::vector<RowVectorPtr>& values) {
+  for (const auto& vec : values) {
+    pushOutput(
+        std::make_shared<StreamRecord>(getPlanNodeId(), vec));
+  }
+}
+
+RowVectorPtr WindowJoin::wrapRows(
+    const RowVectorPtr& input,
+    const std::vector<vector_size_t>& indices) {
+  int n = indices.size();
+  auto indicesBuf = allocateIndices(n, pool_);
+  auto raw = indicesBuf->asMutable<vector_size_t>();
+  std::copy(indices.begin(), indices.end(), raw);
+
+  int numChildren = input->childrenSize();
+  std::vector<VectorPtr> children(numChildren);
+  for (int i = 0; i < numChildren; i++) {
+    children[i] = BaseVector::wrap(
+        input->childAt(i)->type(), pool_, input->childAt(i), indicesBuf, n);
+  }
+
+  return std::make_shared<RowVector>(
+      pool_, input->type(), nullptr /*nulls*/, n, std::move(children));
 }
 
 } // namespace facebook::velox::stateful

@@ -315,6 +315,7 @@ StatefulOperatorPtr StatefulPlanner::transformStreamWindowJoinOperator(
       std::move(rightKeySelector),
       std::move(probe),
       std::move(targets),
+      joinNode->joinType(),
       joinNode->leftWindowEndIndex(),
       joinNode->rightWindowEndIndex());
 }
