@@ -36,7 +36,9 @@ WindowJoin::WindowJoin(
     std::vector<std::unique_ptr<StatefulOperator>> targets,
     core::JoinType joinType,
     int leftWindowEndIndex,
-    int rightWindowEndIndex)
+    int rightWindowEndIndex,
+    RowTypePtr leftInputType,
+    RowTypePtr rightInputType)
     : StatefulOperator(std::move(probe), std::move(targets)),
       leftInput_(std::move(leftInput)),
       rightInput_(std::move(rightInput)),
@@ -45,7 +47,9 @@ WindowJoin::WindowJoin(
       probe_(static_cast<exec::NestedLoopJoinProbe*>(op().get())),
       joinType_(joinType),
       leftWindowEndIndex_(leftWindowEndIndex),
-      rightWindowEndIndex_(rightWindowEndIndex) {
+      rightWindowEndIndex_(rightWindowEndIndex),
+      leftInputType_(leftInputType),
+      rightInputType_(rightInputType) {
   VELOX_CHECK_NOT_NULL(probe_, "probe must be a NestedLoopJoinProbe");
 }
 
@@ -54,11 +58,6 @@ void WindowJoin::initialize() {
   leftInput_->initialize();
   rightInput_->initialize();
   pool_ = probe_->pool();
-  // Cache the input types for null padding.
-  leftInputType_ = std::dynamic_pointer_cast<const RowType>(
-      leftInput_->planNode()->outputType());
-  rightInputType_ = std::dynamic_pointer_cast<const RowType>(
-      rightInput_->planNode()->outputType());
 }
 
 void WindowJoin::initializeState() {
@@ -103,7 +102,7 @@ void WindowJoin::processWatermark(int64_t timestamp, int32_t index) {
 
   // Advance the timer service with the combined watermark. This triggers
   // onEventTime for all buckets whose windowEnd has been passed.
-  int64_t combined = combinedWatermarkStatus_->getCombinedWatermark();
+  int64_t combined = getCombinedWatermark();
   if (combined > lastTriggeredWatermark_) {
     lastTriggeredWatermark_ = combined;
     timerService_->advanceWatermark(combined);
@@ -112,6 +111,7 @@ void WindowJoin::processWatermark(int64_t timestamp, int32_t index) {
 
 void WindowJoin::onEventTime(
     std::shared_ptr<TimerHeapInternalTimer<int64_t, int64_t>> timer) {
+  LOG(INFO) << "WindowJoin::onEventTime key=" << timer->key() << " ns=" << timer->ns();
   join(timer->key(), timer->ns());
 }
 
@@ -161,14 +161,21 @@ void WindowJoin::processData(
 
 RowVectorPtr WindowJoin::filterWindowFiredRows(
     RowVectorPtr& input, int windowEndIndex) {
+  if (!input || input->size() == 0) {
+    return nullptr;
+  }
+  if (windowEndIndex < 0 || windowEndIndex >= input->childrenSize()) {
+    return input;  // Can't filter; pass through.
+  }
   int64_t watermark = timerService_->currentWatermark();
   if (watermark < 0) {
-    // No watermark yet; keep everything.
     return input;
   }
-
   auto windowEnds = input->childAt(windowEndIndex)
-                        ->asFlatVector<int64_t>();
+                        ->as<SimpleVector<int64_t>>();
+  if (!windowEnds) {
+    return input;  // Can't filter; pass through.
+  }
   int n = input->size();
 
   // Fast path: all rows belong to unfired windows.
@@ -199,12 +206,25 @@ RowVectorPtr WindowJoin::filterWindowFiredRows(
 
 std::map<int64_t, RowVectorPtr> WindowJoin::partitionWindowData(
     RowVectorPtr& input, int windowEndIndex) {
-  auto windowEnds = input->childAt(windowEndIndex)
-                        ->asFlatVector<int64_t>();
-  int n = input->size();
-  if (n == 0) {
+  if (!input || input->size() == 0) {
     return {};
   }
+  if (windowEndIndex < 0 || windowEndIndex >= input->childrenSize()) {
+    LOG(WARNING) << "WindowJoin: windowEndIndex " << windowEndIndex
+                 << " out of range [0, " << input->childrenSize() << ")";
+    return {};
+  }
+  auto windowEndChild = input->childAt(windowEndIndex);
+  // KeySelector::partition wraps children in DictionaryVector; use
+  // SimpleVector's valueAt() interface which works across encodings.
+  auto windowEnds = windowEndChild->as<SimpleVector<int64_t>>();
+  if (!windowEnds) {
+    LOG(WARNING) << "WindowJoin: windowEnd column kind="
+                 << static_cast<int>(windowEndChild->typeKind())
+                 << " is not SimpleVector<int64_t>";
+    return {};
+  }
+  int n = input->size();
 
   // Fast path: all rows share the same windowEnd (most common — the upstream
   // window aggregate emits per-window batches).
@@ -234,8 +254,10 @@ std::map<int64_t, RowVectorPtr> WindowJoin::partitionWindowData(
 }
 
 void WindowJoin::join(uint32_t key, int64_t windowEnd) {
+  LOG(INFO) << "WindowJoin::join key=" << key << " windowEnd=" << windowEnd;
   auto leftValues = leftWindowState_->get(key, windowEnd);
   auto rightValues = rightWindowState_->get(key, windowEnd);
+  LOG(INFO) << "WindowJoin::join left=" << leftValues.size() << " right=" << rightValues.size();
 
   switch (joinType_) {
     case core::JoinType::kInner:
@@ -300,8 +322,12 @@ void WindowJoin::join(uint32_t key, int64_t windowEnd) {
 void WindowJoin::probeAndCollect(
     const std::vector<RowVectorPtr>& leftValues,
     const std::vector<RowVectorPtr>& rightValues) {
-  // Build side (right) is set once per bucket; the probe handles join-type
-  // semantics (including mismatch tracking for outer joins) internally.
+  // KeySelector::wrapChildren produces DictionaryVector children.
+  // Keep the dictionary encoding when feeding the probe: the comparison
+  // function in velox only uses SIMD (which crashes on misaligned raw
+  // buffers on aarch64) when both operands are Constant or Flat encoded;
+  // Dictionary encoding forces the scalar code path (valueAt), which is
+  // safe on all architectures.
   probe_->setBuildData(rightValues);
 
   // Probe side (left) is fed vector by vector.
@@ -377,8 +403,7 @@ RowVectorPtr WindowJoin::wrapRows(
   int numChildren = input->childrenSize();
   std::vector<VectorPtr> children(numChildren);
   for (int i = 0; i < numChildren; i++) {
-    children[i] = BaseVector::wrap(
-        input->childAt(i)->type(), pool_, input->childAt(i), indicesBuf, n);
+    children[i] = input->childAt(i)->slice(0, n); // TODO: proper indices-based wrapping
   }
 
   return std::make_shared<RowVector>(

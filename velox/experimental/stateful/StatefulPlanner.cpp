@@ -317,7 +317,9 @@ StatefulOperatorPtr StatefulPlanner::transformStreamWindowJoinOperator(
       std::move(targets),
       joinNode->joinType(),
       joinNode->leftWindowEndIndex(),
-      joinNode->rightWindowEndIndex());
+      joinNode->rightWindowEndIndex(),
+      joinNode->sources()[0]->outputType(),
+      joinNode->sources()[1]->outputType());
 }
 
 StatefulOperatorPtr StatefulPlanner::transformStreamWindowAggregationOperator(

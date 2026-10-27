@@ -283,6 +283,24 @@ core::PlanNodePtr StreamWindowJoinNode::create(
 
   auto outputType = ISerializable::deserialize<RowType>(obj["outputType"]);
 
+  // Deserialize joinType: use probe's joinType if not explicitly present
+  // (backward compatible with older JSON that lacks the field).
+  core::JoinType joinType = probe->joinType();
+  if (obj.count("joinType") > 0) {
+    auto joinTypeStr = obj["joinType"].asString();
+    if (joinTypeStr == "INNER") {
+      joinType = core::JoinType::kInner;
+    } else if (joinTypeStr == "LEFT") {
+      joinType = core::JoinType::kLeft;
+    } else if (joinTypeStr == "RIGHT") {
+      joinType = core::JoinType::kRight;
+    } else if (joinTypeStr == "FULL") {
+      joinType = core::JoinType::kFull;
+    } else if (joinTypeStr == "ANTI") {
+      joinType = core::JoinType::kAnti;
+    }
+  }
+
   return std::make_shared<StreamWindowJoinNode>(
       planNodeId,
       std::move(sources),
@@ -291,6 +309,7 @@ core::PlanNodePtr StreamWindowJoinNode::create(
       std::move(probe),
       outputType,
       obj["numPartitions"].asInt(),
+      joinType,
       obj["leftWindowEndIndex"].asInt(),
       obj["rightWindowEndIndex"].asInt());
 }

@@ -371,6 +371,7 @@ class StreamWindowJoinNode : public core::PlanNode {
       const std::shared_ptr<const core::NestedLoopJoinNode>& probe,
       RowTypePtr outputType,
       int numPartitions,
+      core::JoinType joinType,
       int leftWindowEndIndex,
       int rightWindowEndIndex)
       : core::PlanNode(id),
@@ -380,12 +381,17 @@ class StreamWindowJoinNode : public core::PlanNode {
         probe_(std::move(probe)),
         outputType_(std::move(outputType)),
         numPartitions_(numPartitions),
+        joinType_(joinType),
         leftWindowEndIndex_(leftWindowEndIndex),
         rightWindowEndIndex_(rightWindowEndIndex) {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
   }
+  core::JoinType joinType() const {
+    return joinType_;
+  }
+
 
   const std::vector<core::PlanNodePtr>& sources() const override {
     return sources_;
@@ -434,6 +440,7 @@ class StreamWindowJoinNode : public core::PlanNode {
   const std::shared_ptr<const core::NestedLoopJoinNode> probe_;
   const RowTypePtr outputType_;
   const int numPartitions_;
+  const core::JoinType joinType_;
   const int leftWindowEndIndex_;
   const int rightWindowEndIndex_;
 };

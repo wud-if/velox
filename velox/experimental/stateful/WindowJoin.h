@@ -50,7 +50,9 @@ class WindowJoin : public StatefulOperator,
       std::vector<std::unique_ptr<StatefulOperator>> targets,
       core::JoinType joinType,
       int leftWindowEndIndex,
-      int rightWindowEndIndex);
+      int rightWindowEndIndex,
+      RowTypePtr leftInputType,
+      RowTypePtr rightInputType);
 
   void initialize() override;
 
