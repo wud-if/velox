@@ -448,30 +448,23 @@ class HeapKeyedStateBackend : public KeyedStateBackend {
   std::unordered_map<std::string, StatePtr> createdStates_;
 };
 
-/// Creates one keyed operator's backend, dispatched on the task backend's
-/// declared type. The plan contributes the key schema (the KeyedStateSpec),
-/// the task backend's parameters the key-group configuration - the one
-/// place those numbers exist at runtime. K is the operator's key type (a
-/// StateKey subclass) - only the operator can name it, so this entry is a
-/// free template and never a virtual member of StateBackend: a virtual
-/// function cannot be a template, so no factory on the base can hand out
-/// the typed backend. A declared type with no engine behind it fails
-/// here, at operator initialization, instead of silently producing a
-/// heap backend. The pre-generic factory on StateBackend stays for the
-/// not-yet-migrated operators; this entry is the door for the typed ones.
+/// The typed creation entry declared on StateBackend, dispatched on the
+/// task backend's declared type. The plan contributes the key schema (the
+/// KeyedStateSpec), the task backend's parameters the key-group
+/// configuration - the one place those numbers exist at runtime. Defined
+/// here, not in StateBackend.h, because the return type names this class
+/// template and the base header must not include this one.
 template <typename K>
-std::unique_ptr<HeapKeyedStateBackend<K>> createKeyedStateBackend(
-    const StateBackend& stateBackend,
+std::unique_ptr<HeapKeyedStateBackend<K>> StateBackend::createKeyedStateBackend(
     const KeyedStateSpec& spec,
-    memory::MemoryPool* pool) {
-  const auto& parameters = stateBackend.parameters();
-  switch (parameters->getBackendType()) {
+    memory::MemoryPool* pool) const {
+  switch (parameters_->getBackendType()) {
     case StateBackendType::HEAP:
       return std::make_unique<HeapKeyedStateBackend<K>>(
           spec.keyTypes(),
-          parameters->getMaxParallelism(),
-          parameters->getStartKeyGroup(),
-          parameters->getNumKeyGroups(),
+          parameters_->getMaxParallelism(),
+          parameters_->getStartKeyGroup(),
+          parameters_->getNumKeyGroups(),
           pool);
     case StateBackendType::ROCKSDB:
       VELOX_UNSUPPORTED("The RocksDB keyed state backend is not implemented");

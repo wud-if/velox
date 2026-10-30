@@ -35,6 +35,9 @@ class HashMapStateBackend : public StateBackend {
     return nullptr;
   }
 
+  // The override alone would hide the base's typed creation entry (the
+  // member template cannot be virtual); keep it visible on this type too.
+  using StateBackend::createKeyedStateBackend;
   std::shared_ptr<KeyedStateBackend> createKeyedStateBackend() override;
 };
 

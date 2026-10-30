@@ -1399,7 +1399,7 @@ TEST_F(StateBackendTest, createKeyedStateBackendBuildsHeapBackend) {
           StateBackendType::HEAP, "job", "op", 256, 10, 20));
 
   auto backend =
-      createKeyedStateBackend<RowContainerStateKey>(taskBackend, spec, pool());
+      taskBackend.createKeyedStateBackend<RowContainerStateKey>(spec, pool());
 
   EXPECT_EQ(256, backend->maxParallelism());
   EXPECT_EQ(10, backend->startKeyGroup());
@@ -1435,7 +1435,7 @@ TEST_F(StateBackendTest, createKeyedStateBackendRejectsRocksdb) {
           std::unordered_map<std::string, TypePtr>{}));
 
   EXPECT_THROW(
-      createKeyedStateBackend<RowContainerStateKey>(taskBackend, spec, pool()),
+      taskBackend.createKeyedStateBackend<RowContainerStateKey>(spec, pool()),
       VeloxUserError);
 }
 
