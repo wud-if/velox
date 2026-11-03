@@ -60,12 +60,18 @@ void WindowJoin::initialize() {
   pool_ = probe_->pool();
 }
 
+void WindowJoin::initializeStateBackend(StateBackend* stateBackend) {
+  // The base class no longer creates a state handler (the operator-owned
+  // keyed state migration is still in flight upstream); create our own
+  // from the task-level backend, as the base class documents.
+  if (!stateHandler()) {
+    stateHandler_ = std::make_shared<StreamOperatorStateHandler>(
+        op()->operatorId(), stateBackend->createKeyedStateBackend());
+  }
+  StatefulOperator::initializeStateBackend(stateBackend);
+}
+
 void WindowJoin::initializeState() {
-  // TODO: migrate this operator to operator-owned keyed state (cf.
-  // GroupAggregator::initializeStateBackend) and remove this guard.
-  VELOX_NYI(
-      "WindowJoin is not yet migrated to operator-owned keyed state; there "
-      "is no state handler to initialize");
   StateDescriptor leftStateDesc("left-records");
   leftWindowState_ = stateHandler()->getListState(leftStateDesc);
   StateDescriptor rightStateDesc("right-records");

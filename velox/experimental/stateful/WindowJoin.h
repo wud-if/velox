@@ -56,6 +56,8 @@ class WindowJoin : public StatefulOperator,
 
   void initialize() override;
 
+  void initializeStateBackend(StateBackend* stateBackend) override;
+
   void initializeState() override;
 
   bool isFinished() override;
