@@ -71,6 +71,13 @@ class RocksDBKeyedStateBackend : public KeyedStateBackend {
       int64_t timestamp,
       CheckpointOptions checkpointOptions) override;
 
+  // The typed checkpoint plane is not implemented for the RocksDB backend
+  // yet; the operators' checkpoint walk fails loud here instead of
+  // silently producing an empty snapshot.
+  std::string snapshotBytes() override;
+
+  void restoreBytes(const std::string& bytes) override;
+
   // Deprecated, this maybe removed later
   void notifyCheckpointComplete(int64_t checkpointId) override;
 

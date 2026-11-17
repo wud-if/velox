@@ -178,6 +178,17 @@ class HeapKeyedStateBackend : public KeyedStateBackend {
       int64_t /*timestamp*/,
       CheckpointOptions /*checkpointOptions*/) override {}
 
+  // The type-erased door of the typed plane: the checkpoint walk calls
+  // these through the base; the stream format is snapshot()'s /
+  // restore()'s.
+  std::string snapshotBytes() override {
+    return snapshot();
+  }
+
+  void restoreBytes(const std::string& bytes) override {
+    restore(bytes);
+  }
+
   void notifyCheckpointComplete(int64_t /*checkpointId*/) override {}
 
   void notifyCheckpointAborted(int64_t /*checkpointId*/) override {}

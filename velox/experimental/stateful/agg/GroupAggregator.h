@@ -77,15 +77,21 @@ class GroupAggregator : public StatefulOperator {
     return "GroupAggregator";
   }
 
-  /// The keyed state backend this operator owns. Checkpoint drivers
-  /// snapshot and restore the aggregation state through it; the task-level
-  /// wiring that persists the checkpoint bytes is delivered separately.
+  /// The keyed state backend this operator owns, type-erased for the
+  /// checkpoint walk: the walk collects its bytes into the task's
+  /// checkpoint records on snapshot and routes them back on restore (see
+  /// StatefulOperator::ownedKeyedStateBackend).
+  KeyedStateBackend* ownedKeyedStateBackend() const override {
+    return keyedBackend_.get();
+  }
+
+  /// The typed door to the same backend, for checkpoint drivers that hold
+  /// the operator directly (tests).
   HeapKeyedStateBackend<RowContainerStateKey>& keyedStateBackend() {
     return *keyedBackend_;
   }
 
  private:
-
   // Initializes freshly materialized value rows: one initializeNewGroups
   // per aggregate, over the whole batch. Registered as the descriptor's init
   // callback, so it runs inside the state on each batch of misses.
