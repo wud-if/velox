@@ -249,6 +249,8 @@ void StreamWindowJoinNode::addDetails(std::stringstream& stream) const {
   stream << "leftPartFuncSpec: " << leftPartFuncSpec_->toString();
   stream << ", rightPartFuncSpec: " << rightPartFuncSpec_->toString();
   stream << ", probe: " << probe_->toString();
+  stream << ", keyedState: " << keyedStateSpec_->keyChannels().size()
+         << " key channels";
 }
 
 folly::dynamic StreamWindowJoinNode::serialize() const {
@@ -256,6 +258,7 @@ folly::dynamic StreamWindowJoinNode::serialize() const {
   obj["leftPartFuncSpec"] = leftPartFuncSpec_->serialize();
   obj["rightPartFuncSpec"] = rightPartFuncSpec_->serialize();
   obj["probe"] = probe_->serialize();
+  obj["keyedStateSpec"] = keyedStateSpec_->serialize();
   obj["outputType"] = outputType_->serialize();
   obj["numPartitions"] = numPartitions_;
   obj["leftWindowEndIndex"] = leftWindowEndIndex_;
@@ -280,6 +283,8 @@ core::PlanNodePtr StreamWindowJoinNode::create(
           obj["rightPartFuncSpec"], context);
   auto probe = ISerializable::deserialize<core::NestedLoopJoinNode>(
       obj["probe"], context);
+  auto keyedStateSpec = ISerializable::deserialize<KeyedStateSpec>(
+      obj["keyedStateSpec"], context);
 
   auto outputType = ISerializable::deserialize<RowType>(obj["outputType"]);
 
@@ -289,6 +294,7 @@ core::PlanNodePtr StreamWindowJoinNode::create(
       std::move(leftPartFuncSpec),
       std::move(rightPartFuncSpec),
       std::move(probe),
+      std::move(keyedStateSpec),
       outputType,
       obj["numPartitions"].asInt(),
       obj["leftWindowEndIndex"].asInt(),
@@ -318,6 +324,7 @@ folly::dynamic StreamWindowAggregationNode::serialize() const {
   obj["rowtimeIndex"] = rowtimeIndex_;
   obj["windowStartIndex"] = windowStartIndex_;
   obj["windowEndIndex"] = windowEndIndex_;
+  obj["isSinglePhase"] = isSinglePhase_;
   return obj;
 }
 
@@ -366,7 +373,8 @@ core::PlanNodePtr StreamWindowAggregationNode::create(
       obj["isEventTime"].asBool(),
       obj["rowtimeIndex"].asInt(),
       obj["windowStartIndex"].asInt(),
-      obj["windowEndIndex"].asInt());
+      obj["windowEndIndex"].asInt(),
+      obj.count("isSinglePhase") > 0 ? obj["isSinglePhase"].asBool() : false);
 }
 
 const std::vector<core::PlanNodePtr>& GroupWindowAggsHandlerNode::sources()

@@ -130,9 +130,8 @@ std::shared_ptr<StreamRecord> StreamRecord::create(
 SimpleVectorPtr<int8_t> makeRowKindVector(
     memory::MemoryPool* pool,
     folly::Range<const RowKind*> kinds) {
-  auto vector = std::static_pointer_cast<FlatVector<int8_t>>(
-      BaseVector::create(
-          TINYINT(), static_cast<vector_size_t>(kinds.size()), pool));
+  auto vector = std::static_pointer_cast<FlatVector<int8_t>>(BaseVector::create(
+      TINYINT(), static_cast<vector_size_t>(kinds.size()), pool));
   for (size_t i = 0; i < kinds.size(); ++i) {
     vector->set(static_cast<vector_size_t>(i), static_cast<int8_t>(kinds[i]));
   }

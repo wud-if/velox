@@ -34,12 +34,22 @@ class Window {
 
   virtual std::string toString() const = 0;
 
+  /// The gluten planner serializes window types as HOP=0, TUMBLE=1,
+  /// CUMULATIVE=2, SESSION=3, while the velox enum orders SESSION before
+  /// CUMULATIVE - translate at this serde boundary.
   static WindowType getType(const int32_t t) {
-    if (t >= 0 && t <= 3) {
-      return static_cast<WindowType>(t);
-    } else {
-      VELOX_FAIL(
-          "Window type value {} is illegal, it is not between 0 and 3", t);
+    switch (t) {
+      case 0:
+        return WindowType::HOP;
+      case 1:
+        return WindowType::TUMBLE;
+      case 2:
+        return WindowType::CUMULATIVE;
+      case 3:
+        return WindowType::SESSION;
+      default:
+        VELOX_FAIL(
+            "Window type value {} is illegal, it is not between 0 and 3", t);
     }
   }
 };

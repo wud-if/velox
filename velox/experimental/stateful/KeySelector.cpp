@@ -152,6 +152,35 @@ KeySelector::KeySelector(
       pool_(pool),
       numPartitions_(numPartitions) {}
 
+void KeySelector::rowKeyIds(
+    const RowVectorPtr& input,
+    std::vector<int64_t>& ids) {
+  ids.assign(input->size(), 0);
+  if (!partitionFunction_) {
+    // Bound (probe-based) selectors have no hash-derived ids.
+    return;
+  }
+  prepareForInput(input);
+  auto windowPartitionFunction =
+      dynamic_cast<WindowPartitionFunction*>(partitionFunction_.get());
+  if (windowPartitionFunction) {
+    auto res = windowPartitionFunction->partition(*input, ids);
+    if (res) {
+      std::fill(ids.begin(), ids.end(), *res);
+    }
+    return;
+  }
+  std::vector<uint32_t> tmp(ids.size());
+  auto res = partitionFunction_->partition(*input, tmp);
+  if (res) {
+    std::fill(ids.begin(), ids.end(), static_cast<int64_t>(*res));
+    return;
+  }
+  for (size_t i = 0; i < tmp.size(); ++i) {
+    ids[i] = static_cast<int64_t>(tmp[i]);
+  }
+}
+
 std::map<int64_t, RowVectorPtr> KeySelector::partition(
     const RowVectorPtr& input) {
   if (numPartitions_ == 1) {

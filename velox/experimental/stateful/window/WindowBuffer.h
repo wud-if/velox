@@ -33,7 +33,7 @@ class WindowBuffer {
   virtual void
   addElement(uint32_t key, int64_t window, RowVectorPtr& element) = 0;
 
-  virtual std::unordered_map<WindowKey, std::list<RowVectorPtr>>&
+  virtual std::unordered_map<WindowKey, std::list<RowVectorPtr>>
   advanceProgress(int64_t progress) = 0;
 
   virtual void clear() = 0;
@@ -49,7 +49,7 @@ class RecordsWindowBuffer : public WindowBuffer {
   void addElement(uint32_t key, int64_t sliceEnd, RowVectorPtr& element)
       override;
 
-  std::unordered_map<WindowKey, std::list<RowVectorPtr>>& advanceProgress(
+  std::unordered_map<WindowKey, std::list<RowVectorPtr>> advanceProgress(
       int64_t progress) override;
 
   void clear() override {

@@ -298,24 +298,15 @@ StatefulOperatorPtr StatefulPlanner::transformStreamWindowJoinOperator(
       transformOperator(joinNode->sources()[1]);
   std::unique_ptr<exec::Operator> probe = transformOperator(joinNode->probe());
 
-  std::unique_ptr<KeySelector> leftKeySelector = std::make_unique<KeySelector>(
-      joinNode->leftPartFuncSpec()->create(INT_MAX, false),
-      probe->pool(),
-      joinNode->numPartitions());
-  std::unique_ptr<KeySelector> rightKeySelector = std::make_unique<KeySelector>(
-      joinNode->rightPartFuncSpec()->create(INT_MAX, false),
-      probe->pool(),
-      joinNode->numPartitions());
-
+  // The key selectors are bound to the keyed backend in
+  // WindowJoin::initializeStateBackend, from the plan's KeyedStateSpec - the
+  // backend owns the key table and exists only at execution time.
   return std::make_unique<WindowJoin>(
       std::move(left),
       std::move(right),
-      std::move(leftKeySelector),
-      std::move(rightKeySelector),
       std::move(probe),
       std::move(targets),
-      joinNode->leftWindowEndIndex(),
-      joinNode->rightWindowEndIndex());
+      joinNode);
 }
 
 StatefulOperatorPtr StatefulPlanner::transformStreamWindowAggregationOperator(
@@ -367,7 +358,8 @@ StatefulOperatorPtr StatefulPlanner::transformStreamWindowAggregationOperator(
         windowAggNode->useDayLightSaving(),
         windowAggNode->isEventTime(),
         windowAggNode->windowStartIndex(),
-        windowAggNode->windowEndIndex());
+        windowAggNode->windowEndIndex(),
+        !windowAggNode->isSinglePhase());
   }
 }
 

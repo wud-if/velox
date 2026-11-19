@@ -43,7 +43,9 @@ class KeyedStateSpec : public ISerializable {
   KeyedStateSpec(
       std::vector<column_index_t> keyChannels,
       std::vector<TypePtr> keyTypes)
-      : keyChannels_(std::move(keyChannels)), keyTypes_(std::move(keyTypes)) {
+      : keyChannels_(std::move(keyChannels)),
+        rightKeyChannels_(),
+        keyTypes_(std::move(keyTypes)) {
     VELOX_CHECK(!keyChannels_.empty(), "A keyed state needs a key channel");
     VELOX_CHECK_EQ(
         keyChannels_.size(),
@@ -51,8 +53,35 @@ class KeyedStateSpec : public ISerializable {
         "Every key channel needs a key type");
   }
 
+  /// Two-input keyed operators (window join): the key channels of each
+  /// input, pairing by position. One-input operators use the single-list
+  /// constructor; the right list stays empty there.
+  KeyedStateSpec(
+      std::vector<column_index_t> leftKeyChannels,
+      std::vector<column_index_t> rightKeyChannels,
+      std::vector<TypePtr> keyTypes)
+      : keyChannels_(std::move(leftKeyChannels)),
+        rightKeyChannels_(std::move(rightKeyChannels)),
+        keyTypes_(std::move(keyTypes)) {
+    VELOX_CHECK(!keyChannels_.empty(), "A keyed state needs a key channel");
+    VELOX_CHECK_EQ(
+        keyChannels_.size(),
+        rightKeyChannels_.size(),
+        "Two-input keyed state needs a key channel per input");
+    VELOX_CHECK_EQ(
+        keyChannels_.size(),
+        keyTypes_.size(),
+        "Every key channel needs a key type");
+  }
+
+  /// Key channels of the first (or only) input.
   const std::vector<column_index_t>& keyChannels() const {
     return keyChannels_;
+  }
+
+  /// Key channels of the second input; empty for one-input operators.
+  const std::vector<column_index_t>& rightKeyChannels() const {
+    return rightKeyChannels_;
   }
 
   const std::vector<TypePtr>& keyTypes() const {
@@ -62,6 +91,7 @@ class KeyedStateSpec : public ISerializable {
   folly::dynamic serialize() const override {
     folly::dynamic obj = folly::dynamic::object;
     obj["keyChannels"] = ISerializable::serialize(keyChannels_);
+    obj["rightKeyChannels"] = ISerializable::serialize(rightKeyChannels_);
     obj["keyTypes"] = ISerializable::serialize(keyTypes_);
     return obj;
   }
@@ -75,17 +105,34 @@ class KeyedStateSpec : public ISerializable {
       keyChannels.push_back(
           ISerializable::deserialize<column_index_t>(channel));
     }
+    std::vector<column_index_t> rightKeyChannels;
+    if (obj.count("rightKeyChannels") > 0) {
+      rightKeyChannels.reserve(obj["rightKeyChannels"].size());
+      for (const auto& channel : obj["rightKeyChannels"]) {
+        rightKeyChannels.push_back(
+            ISerializable::deserialize<column_index_t>(channel));
+      }
+    }
     std::vector<TypePtr> keyTypes;
     keyTypes.reserve(obj["keyTypes"].size());
     for (const auto& type : obj["keyTypes"]) {
       keyTypes.push_back(Type::create(type));
     }
+    // An empty second channel list is a one-input spec (the single-list
+    // constructor forbids the empty pairing); anything else pairs per input.
+    if (rightKeyChannels.empty()) {
+      return std::make_shared<KeyedStateSpec>(
+          std::move(keyChannels), std::move(keyTypes));
+    }
     return std::make_shared<KeyedStateSpec>(
-        std::move(keyChannels), std::move(keyTypes));
+        std::move(keyChannels),
+        std::move(rightKeyChannels),
+        std::move(keyTypes));
   }
 
  private:
   const std::vector<column_index_t> keyChannels_;
+  const std::vector<column_index_t> rightKeyChannels_;
   const std::vector<TypePtr> keyTypes_;
 };
 

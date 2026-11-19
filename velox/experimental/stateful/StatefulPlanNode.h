@@ -370,6 +370,7 @@ class StreamWindowJoinNode : public core::PlanNode {
       const std::shared_ptr<const core::PartitionFunctionSpec>&
           rightPartFuncSpec,
       const std::shared_ptr<const core::NestedLoopJoinNode>& probe,
+      const std::shared_ptr<const KeyedStateSpec>& keyedStateSpec,
       RowTypePtr outputType,
       int numPartitions,
       int leftWindowEndIndex,
@@ -379,6 +380,7 @@ class StreamWindowJoinNode : public core::PlanNode {
         leftPartFuncSpec_(std::move(leftPartFuncSpec)),
         rightPartFuncSpec_(std::move(rightPartFuncSpec)),
         probe_(std::move(probe)),
+        keyedStateSpec_(std::move(keyedStateSpec)),
         outputType_(std::move(outputType)),
         numPartitions_(numPartitions),
         leftWindowEndIndex_(leftWindowEndIndex),
@@ -410,6 +412,10 @@ class StreamWindowJoinNode : public core::PlanNode {
     return probe_;
   }
 
+  const std::shared_ptr<const KeyedStateSpec>& keyedStateSpec() const {
+    return keyedStateSpec_;
+  }
+
   const int numPartitions() const {
     return numPartitions_;
   }
@@ -433,6 +439,7 @@ class StreamWindowJoinNode : public core::PlanNode {
   const std::shared_ptr<const core::PartitionFunctionSpec> leftPartFuncSpec_;
   const std::shared_ptr<const core::PartitionFunctionSpec> rightPartFuncSpec_;
   const std::shared_ptr<const core::NestedLoopJoinNode> probe_;
+  const std::shared_ptr<const KeyedStateSpec> keyedStateSpec_;
   const RowTypePtr outputType_;
   const int numPartitions_;
   const int leftWindowEndIndex_;
@@ -459,7 +466,8 @@ class StreamWindowAggregationNode : public core::PlanNode {
       bool isEventTime,
       int rowtimeIndex,
       int windowStartIndex,
-      int windowEndIndex)
+      int windowEndIndex,
+      bool isSinglePhase = false)
       : PlanNode(id),
         aggregation_(std::move(aggregationNode)),
         localAgg_(std::move(localAgg)),
@@ -476,7 +484,8 @@ class StreamWindowAggregationNode : public core::PlanNode {
         isEventTime_(isEventTime),
         rowtimeIndex_(rowtimeIndex),
         windowStartIndex_(windowStartIndex),
-        windowEndIndex_(windowEndIndex) {}
+        windowEndIndex_(windowEndIndex),
+        isSinglePhase_(isSinglePhase) {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
@@ -544,6 +553,13 @@ class StreamWindowAggregationNode : public core::PlanNode {
     return windowEndIndex_;
   }
 
+  /// True for the single-phase window aggregate node (session windows):
+  /// its input is raw rows; the two-phase global node receives the local
+  /// aggregator's slice-end tag in the last input column instead.
+  bool isSinglePhase() const {
+    return isSinglePhase_;
+  }
+
   const std::vector<core::PlanNodePtr>& sources() const override;
 
   std::string_view name() const override {
@@ -573,6 +589,7 @@ class StreamWindowAggregationNode : public core::PlanNode {
   int rowtimeIndex_;
   int windowStartIndex_;
   int windowEndIndex_;
+  bool isSinglePhase_ = false;
 };
 
 class GroupWindowAggsHandlerNode : public core::PlanNode {

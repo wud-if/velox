@@ -191,6 +191,15 @@ class StatefulOperator {
   bool sink_;
   bool sourceEmpty_ = true;
   std::unique_ptr<CombinedWatermarkStatus> combinedWatermarkStatus_;
+
+ protected:
+  /// Returns the combined (minimum) watermark across all inputs.
+  int64_t getCombinedWatermark() const {
+    return combinedWatermarkStatus_
+        ? combinedWatermarkStatus_->getCombinedWatermark()
+        : -1;
+  }
+
   StreamOperatorStateHandlerPtr stateHandler_;
   static std::shared_ptr<JniCaller> jniCaller_;
 };

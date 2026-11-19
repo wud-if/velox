@@ -255,6 +255,15 @@ void StatefulTask::finish() {
       pendings_.size(),
       operatorChain_ ? operatorChain_->detail() : "<null operator chain>");
   if (operatorChain_) {
+    // Drain the chain (noMoreInput + getOutput) before closing. This is
+    // required when finish() is invoked from the JNI release/close path,
+    // where StatefulTask::next() never ran its own finish-drain. Without
+    // this, the sink's TableWriter::close() aborts the data sink and
+    // discards all buffered rows: TableWriter only flushes in getOutput()
+    // after noMoreInput() (finishDataSink/closeDataSink), and its close()
+    // aborts whenever the sink was not finished. A second finish() after
+    // next()'s own drain is harmless: drained operators return null.
+    operatorChain_->finish();
     operatorChain_->close();
     // TODO: update operator stats
     // remove operators to release memory.

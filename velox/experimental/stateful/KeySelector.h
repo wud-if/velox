@@ -118,6 +118,13 @@ class KeySelector {
   /// operators migrate to probe().
   std::map<int64_t, RowVectorPtr> partition(const RowVectorPtr& input);
 
+  /// Per-row hash-derived key ids of 'input' (the deprecated identity
+  /// partition() buckets by): equal user keys always yield equal ids, so
+  /// sorting rows by id makes equal keys adjacent without the per-key
+  /// split. Used by batched fast paths; all zeros for bound probe-based
+  /// selectors.
+  void rowKeyIds(const RowVectorPtr& input, std::vector<int64_t>& ids);
+
  private:
   void ensureDistinct() const;
 

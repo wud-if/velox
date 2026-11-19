@@ -16,6 +16,9 @@
 #pragma once
 #include <cstdint>
 
+#include <list>
+#include <map>
+
 #include "velox/experimental/stateful/KeySelector.h"
 #include "velox/experimental/stateful/StatefulOperator.h"
 #include "velox/experimental/stateful/StreamElement.h"
@@ -44,7 +47,13 @@ class LocalWindowAggregator : public StatefulOperator {
   void close() override;
 
   void processWatermark(int64_t timestamp) override {
+    // Fire windows BEFORE forwarding the watermark downstream, so that the
+    // fired records precede the watermark element in the task output. If the
+    // watermark is forwarded first, the downstream window operator sees it
+    // before the window data, fires empty windows and then drops the
+    // late-arriving data, losing all output.
     processWatermarkInternal(timestamp);
+    StatefulOperator::processWatermark(timestamp);
   }
 
   std::string name() const override {
@@ -58,6 +67,12 @@ class LocalWindowAggregator : public StatefulOperator {
   std::unique_ptr<KeySelector> keySelector_;
   std::unique_ptr<SliceAssigner> sliceAssigner_;
   WindowBufferPtr windowBuffer_;
+
+  /// Tumble fast path: whole input batches bucketed by slice end, awaiting
+  /// the watermark that fires their slice. Feeding these to the
+  /// aggregation operator in key-sorted chunks replaces the per-key
+  /// splitting and per-key operator cycles of the generic path.
+  std::map<int64_t, std::list<RowVectorPtr>> pendingWholeBatches_;
   const int64_t windowInterval_;
   const bool useDayLightSaving_;
   const int shiftTimeZone_ = 0; // TODO: support time zone shift

@@ -34,6 +34,15 @@ class SliceAssigner {
 
   std::map<int64_t, RowVectorPtr> assignSliceEnd(const RowVectorPtr& input);
 
+  /// Groups the input rows by the slice end tag carried in the LAST column of
+  /// the input. The local window aggregator appends the slice end as the last
+  /// column of every pre-aggregated batch; the global window aggregator must
+  /// use that value directly as the slice end. Re-deriving a window from the
+  /// tag via assignSliceEnd() would shift the slice by one window
+  /// (align(end) + size == end + size for an already aligned end).
+  std::map<int64_t, RowVectorPtr> assignSliceEndFromTag(
+      const RowVectorPtr& input);
+
   int64_t getLastWindowEnd(int64_t sliceEnd);
 
   int64_t getWindowStart(int64_t windowEnd);
@@ -41,6 +50,24 @@ class SliceAssigner {
   // Iterable<Long> expiredSlices(int64_t windowEnd);
 
   int64_t getSliceEndInterval();
+
+  /// Index of the rowtime column this assigner slices on (-1 when the
+  /// assigner runs on processing time).
+  int rowtimeIndex() const {
+    return rowtimeIndex_;
+  }
+
+  WindowType windowType() const {
+    return windowType_;
+  }
+
+  int64_t size() const {
+    return size_;
+  }
+
+  int64_t step() const {
+    return step_;
+  }
 
  private:
   const std::unique_ptr<KeySelector> keySelector_;

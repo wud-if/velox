@@ -15,6 +15,8 @@
  */
 #include "velox/experimental/stateful/state/HashMapStateBackend.h"
 
+#include "velox/experimental/stateful/state/LegacyKeyedStateBackend.h"
+
 namespace facebook::velox::stateful {
 
 HashMapStateBackend::HashMapStateBackend(
@@ -22,12 +24,13 @@ HashMapStateBackend::HashMapStateBackend(
     : StateBackend(parameters) {}
 
 KeyedStateBackendPtr HashMapStateBackend::createKeyedStateBackend() {
-  // The heap backend is generic on the key type (a StateKey subclass),
-  // which this factory cannot know: operators name their key type when they
-  // construct their backend from the StateBackend handed down at
-  // initialization. Until the stateful operators are migrated, there is no
-  // factory-created heap backend; the handler tolerates a null one.
-  return nullptr;
+  // The typed heap backend is generic on the key type (a StateKey
+  // subclass) only the operator can name; the windowjoin/window-agg
+  // operators still key state by the uint32_t key-group hash, so until
+  // they migrate to the typed KeyedStateSpec API the factory hands out
+  // the legacy bridge backend (stateful::legacy in
+  // LegacyKeyedStateBackend.h). Drop this when they migrate.
+  return std::make_shared<legacy::HeapKeyedStateBackend>();
 }
 
 } // namespace facebook::velox::stateful

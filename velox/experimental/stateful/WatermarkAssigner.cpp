@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "velox/experimental/stateful/WatermarkAssigner.h"
+#include <glog/logging.h>
 
 #include "velox/experimental/stateful/WatermarkGenerator.h"
 #include "velox/experimental/stateful/window/TimeWindowUtil.h"
@@ -61,33 +62,31 @@ void WatermarkAssigner::advance() {
   const int64_t* timestamps =
       timestampVector->childAt(0)->asFlatVector<int64_t>()->rawValues();
   const vector_size_t timestampSize = timestampVector->size();
-  vector_size_t lastIndex = 0;
 
+  // Batch emission: advance the watermark tracker over the whole batch
+  // (the callback only records the latest watermark; no per-record slicing)
+  // and emit the entire input as ONE record batch followed by ONE
+  // watermark. The previous per-record callback sliced the input at every
+  // watermark change (per record for strictly increasing event time) and
+  // emitted one 1-row batch + one watermark per record - two crossings
+  // per record into the next operator. Downstream window operators only
+  // require all records to arrive before the watermark that closes their
+  // windows; a single trailing watermark preserves that ordering.
+  const int64_t watermarkBefore = lastWatermark;
   currentWatermark = watermark::extractWatermark(
       timestamps,
       timestampSize,
       currentWatermark,
       lastWatermark,
       watermarkInterval_,
-      [&](int64_t watermark, vector_size_t i) {
-        auto output = std::dynamic_pointer_cast<RowVector>(
-            input_->slice(lastIndex, i - lastIndex + 1));
-        lastIndex = i + 1;
-        pushOutput(
-            std::make_shared<StreamRecord>(getPlanNodeId(), std::move(output)));
+      [&](int64_t watermark, vector_size_t /*i*/) {
         lastWatermark = watermark;
-        emitWatermark(watermark);
       });
 
-  // Handle remaining data
-  if (lastIndex == 0) {
-    pushOutput(
-        std::make_shared<StreamRecord>(getPlanNodeId(), std::move(input_)));
-  } else if (lastIndex < timestampSize) {
-    auto output = std::dynamic_pointer_cast<RowVector>(
-        input_->slice(lastIndex, timestampSize - lastIndex));
-    pushOutput(
-        std::make_shared<StreamRecord>(getPlanNodeId(), std::move(output)));
+  pushOutput(
+      std::make_shared<StreamRecord>(getPlanNodeId(), std::move(input_)));
+  if (lastWatermark > watermarkBefore) {
+    emitWatermark(lastWatermark);
   }
   input_.reset();
 }

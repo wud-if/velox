@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #include "velox/experimental/stateful/StatefulCalcOperator.h"
+#include <glog/logging.h>
 
 #include "velox/core/Expressions.h"
 #include "velox/exec/FilterProject.h"

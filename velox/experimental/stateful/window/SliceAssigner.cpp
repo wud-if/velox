@@ -145,13 +145,34 @@ std::map<int64_t, RowVectorPtr> SliceAssigner::assignSliceEnd(
       }
       return sliceEndToData;
     }
+    int64_t groupInterval = 0;
+    if (windowType_ == WindowType::HOP) {
+      // Hopping windows slice by gcd(size, slide); the gluten planner
+      // enforces size % slide == 0, so the slice interval is the slide.
+      groupInterval = sliceSize_;
+    } else if (windowType_ == WindowType::SESSION) {
+      // Session windows are unaligned: each record opens a tentative
+      // window [ts, ts + gap) keyed by its end; merging happens on the
+      // aggregator side. size_ carries the gap.
+      groupInterval = -1;
+    }
     std::unordered_map<int64_t, std::vector<vector_size_t>> groups;
     for (vector_size_t i = 0; i < numRows; ++i) {
       if (isNullAtRow(i)) {
         continue;
       }
       int64_t timestampMs = timestampMillisAt(i);
-      int64_t key = TimeWindowUtil::toEpochMillsForTimer(timestampMs, 0);
+      int64_t key;
+      if (groupInterval > 0) {
+        int64_t start =
+            stateful::TimeWindowUtil::getWindowStartWithOffset(
+                timestampMs, offset_, groupInterval);
+        key = start + groupInterval;
+      } else if (groupInterval < 0) {
+        key = timestampMs + size_;
+      } else {
+        key = TimeWindowUtil::toEpochMillsForTimer(timestampMs, 0);
+      }
       groups[key].push_back(i);
     }
     for (auto& [timeKey, rowIndices] : groups) {
@@ -166,6 +187,50 @@ std::map<int64_t, RowVectorPtr> SliceAssigner::assignSliceEnd(
     }
     return sliceEndToData;
   }
+}
+
+std::map<int64_t, RowVectorPtr> SliceAssigner::assignSliceEndFromTag(
+    const RowVectorPtr& input) {
+  VELOX_CHECK_GT(
+      input->childrenSize(), 0, "input must carry a slice-end tag column");
+  prepareChildrenLoaded(input);
+  const auto& tagVector = input->childAt(input->childrenSize() - 1);
+  const auto* tagSimple = tagVector->as<SimpleVector<int64_t>>();
+  const auto* tagSimpleTs = tagVector->as<SimpleVector<Timestamp>>();
+  VELOX_CHECK(
+      tagSimple != nullptr || tagSimpleTs != nullptr,
+      "slice-end tag column must be BIGINT/TIMESTAMP simple vector, got {}",
+      tagVector->type()->toString());
+
+  const vector_size_t numRows = tagVector->size();
+  auto isNullAtRow = [&](vector_size_t row) {
+    return tagSimple ? tagSimple->isNullAt(row) : tagSimpleTs->isNullAt(row);
+  };
+  auto tagMillisAt = [&](vector_size_t row) {
+    return tagSimple ? tagSimple->valueAt(row)
+                     : tagSimpleTs->valueAt(row).toMillis();
+  };
+
+  velox::memory::MemoryPool* pool = input->pool();
+  std::unordered_map<int64_t, std::vector<vector_size_t>> groups;
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    if (isNullAtRow(i)) {
+      continue;
+    }
+    groups[tagMillisAt(i)].push_back(i);
+  }
+  std::map<int64_t, RowVectorPtr> sliceEndToData;
+  for (auto& [sliceEnd, rowIndices] : groups) {
+    const vector_size_t n = rowIndices.size();
+    BufferPtr indicesBuf = allocateIndices(n, pool);
+    auto* raw = indicesBuf->asMutable<vector_size_t>();
+    for (vector_size_t j = 0; j < n; ++j) {
+      raw[j] = rowIndices[j];
+    }
+    sliceEndToData[sliceEnd] =
+        wrapChildrenByIndices(input, n, indicesBuf, pool);
+  }
+  return sliceEndToData;
 }
 
 int64_t SliceAssigner::getLastWindowEnd(int64_t sliceEnd) {

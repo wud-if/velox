@@ -45,9 +45,12 @@ class WindowAggregator : public StatefulOperator,
       const bool useDayLightSaving,
       const bool isEventTime,
       const int32_t windowStartIndex,
-      const int32_t windowEndIndex);
+      const int32_t windowEndIndex,
+      bool inputTagged);
 
   void initialize() override;
+
+  void initializeStateBackend(StateBackend* stateBackend) override;
 
   void initializeState() override;
 
@@ -62,7 +65,19 @@ class WindowAggregator : public StatefulOperator,
   }
 
   void processWatermark(int64_t timestamp) override {
-    // processWatermarkInternal(timestamp);
+    // Fire windows before forwarding the watermark downstream (see
+    // LocalWindowAggregator::processWatermark for the ordering rationale).
+    processWatermarkInternal(timestamp);
+    StatefulOperator::processWatermark(timestamp);
+  }
+
+  void processWatermark(int64_t timestamp, int32_t index) override {
+    // Fire windows for the incoming watermark BEFORE the base class
+    // forwards the combined watermark downstream, so that the fired
+    // records precede the watermark in the output stream (see
+    // LocalWindowAggregator::processWatermark for the rationale).
+    processWatermarkInternal(timestamp);
+    StatefulOperator::processWatermark(timestamp, index);
   }
 
   void onEventTime(
@@ -76,7 +91,16 @@ class WindowAggregator : public StatefulOperator,
  private:
   void processWatermarkInternal(int64_t timestamp);
 
-  int64_t sliceStateMergeTarget(int64_t sliceToMerge);
+  /// Flushes pendingFireOutputs_ as one merged output batch. Called after
+  /// windowTimerService_->advanceWatermark() completes (all timers for the
+  /// current watermark have fired and collected their outputs).
+  void flushPendingFireOutputs();
+
+  /// Session windows: merges the fired slice's local accumulator into the
+  /// live (unfired) windows of the key that overlap the slice's tentative
+  /// window [sliceEnd - gap, sliceEnd), merging overlapping windows into
+  /// one (Flink session semantics).
+  void mergeSessionWindow(int64_t key, int64_t sliceEnd, RowVectorPtr localAcc);
 
   void onTimer(std::shared_ptr<TimerHeapInternalTimer<int64_t, int64_t>> timer);
 
@@ -96,6 +120,34 @@ class WindowAggregator : public StatefulOperator,
   const bool isEventTime_ = true;
   const int32_t windowStartIndex_ = -1;
   const int32_t windowEndIndex_ = -1;
+
+  /// True when the input rows carry the local aggregator's slice-end tag
+  /// in their last column (two-phase global); false for single-phase input
+  /// (raw rows, e.g. session windows).
+  bool inputTagged_ = true;
+  /// Session windows: live (unfired) windows per key, window end -> start.
+  /// In-memory only: rebuilt as windows accumulate; fired windows are
+  /// erased. Not part of the checkpoint (the e2e checkpoint path is out
+  /// of scope, limitation L2).
+  std::unordered_map<int64_t, std::map<int64_t, int64_t>> sessionLiveWindows_;
+  /// Batch fireWindow: outputs collected from each timer's fireWindow
+  /// during one advanceWatermark pass, flushed as one merged batch after
+  /// all timers for that watermark have fired.
+  std::list<RowVectorPtr> pendingFireOutputs_;
+
+  /// Tumble/hop fast path, input side: whole input batches (already
+  /// local-aggregated, slice-end tagged) bucketed by slice end, held
+  /// until every window containing the slice has fired. Feeding these to
+  /// the aggregation operators in key-sorted chunks replaces the per-key
+  /// splitting, keyed state and timers of the generic path.
+  struct PendingSlice {
+    std::list<RowVectorPtr> batches;
+    /// Next window end of this slice that has not been emitted yet
+    /// (for tumble the only window is the slice end itself; a hop slice
+    /// walks [sliceEnd, sliceEnd + size - slide] stepping by the slide).
+    int64_t nextWindow;
+  };
+  std::map<int64_t, PendingSlice> pendingWholeBatches_;
 
   RowVectorPtr input_;
   int64_t currentProgress_ = 0;

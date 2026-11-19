@@ -38,13 +38,31 @@ void RecordsWindowBuffer::addElement(
   }
 }
 
-std::unordered_map<WindowKey, std::list<RowVectorPtr>>&
+std::unordered_map<WindowKey, std::list<RowVectorPtr>>
 RecordsWindowBuffer::advanceProgress(int64_t progress) {
-  if (TimeWindowUtil::isWindowFired(minSliceEnd_, progress, shiftTimeZone_)) {
-    // There should be some window to be fired, flush buffer to state first.
-    return buffer_;
+  // Flush-and-erase semantics, mirroring Flink's RecordsWindowBuffer: return
+  // ONLY the slices whose window has actually fired and remove them from the
+  // buffer. The previous implementation returned the whole buffer without
+  // clearing it, so already-emitted slices were re-emitted on every
+  // watermark crossing (and unfired slices were emitted prematurely);
+  // downstream received duplicate partial aggregates and double counted
+  // them (verified in e2e: ids emitted at a premature flush plus their
+  // window's full flush produced COUNT=2).
+  std::unordered_map<WindowKey, std::list<RowVectorPtr>> fired;
+  for (auto it = buffer_.begin(); it != buffer_.end();) {
+    if (TimeWindowUtil::isWindowFired(
+            it->first.window(), progress, shiftTimeZone_)) {
+      fired.emplace(it->first, std::move(it->second));
+      it = buffer_.erase(it);
+    } else {
+      ++it;
+    }
   }
-  return empty_;
+  minSliceEnd_ = INT64_MAX;
+  for (const auto& entry : buffer_) {
+    minSliceEnd_ = std::min(minSliceEnd_, entry.first.window());
+  }
+  return fired;
 }
 
 } // namespace facebook::velox::stateful
