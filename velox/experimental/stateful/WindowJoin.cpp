@@ -46,6 +46,13 @@ WindowJoin::WindowJoin(
 
 void WindowJoin::initialize() {
   StatefulOperator::initialize();
+  // The keyed state buckets store rows under (joinKey, windowEnd); every
+  // pair of left/right rows in a fired window already satisfies all
+  // key-equality conjuncts. When the probe carries no residual condition
+  // (the planner dropped the tautological equalities) and the join is
+  // INNER, firing reduces to a plain cross product.
+  fastPath_ = node_->probe()->joinCondition() == nullptr &&
+      isInnerJoin(node_->probe()->joinType());
   // The wrapped probe is driven exclusively by this operator (one private
   // build per due window, no peer probe operators), so its build-mismatch
   // flush skips the multi-driver peer election.
@@ -292,9 +299,21 @@ void WindowJoin::fileRecord(
 }
 
 RowVectorPtr WindowJoin::copyRow(const RowVectorPtr& input, vector_size_t row) {
-  auto copy = BaseVector::create(input->type(), 1, memoryPool());
-  copy->copy(input.get(), 0, row, 1);
-  return std::static_pointer_cast<RowVector>(copy);
+  // Dictionary wrap: zero-copy 1-row view (avoids per-row allocation+copy)
+  BufferPtr indices = allocateIndices(1, memoryPool());
+  indices->asMutable<vector_size_t>()[0] = row;
+  auto result = std::make_shared<RowVector>(
+      memoryPool(),
+      input->type(),
+      nullptr,
+      1,
+      std::vector<VectorPtr>(input->childrenSize()));
+  for (vector_size_t c = 0; c < input->childrenSize(); ++c) {
+    result->childAt(c) =
+        BaseVector::wrapInDictionary(nullptr, indices, 1, input->childAt(c));
+  }
+  result->updateContainsLazyNotLoaded();
+  return result;
 }
 
 void WindowJoin::registerDueWindow(
@@ -318,8 +337,15 @@ void WindowJoin::fireDueWindows(int64_t watermark) {
     auto batch = std::move(dueIndex_.begin()->second);
     dueIndex_.erase(dueIndex_.begin());
     for (const auto& due : batch) {
-      fireWindow(due);
+      if (fastPath_) {
+        fastFireWindow(due);
+      } else {
+        fireWindow(due);
+      }
     }
+  }
+  if (fastPath_) {
+    flushCrossOutputs();
   }
 }
 
@@ -335,17 +361,164 @@ void WindowJoin::fireWindow(const DueWindow& due) {
   // the wrapped probe's state so the same instance serves every window:
   // one memory pool, one compiled join condition.
   probe_->resetForNextWindow(rightRows);
-  for (const auto& leftRow : leftRows) {
-    probe_->addInput(leftRow);
+  if (leftRows.size() == 1) {
+    probe_->addInput(leftRows[0]);
+    drainProbeOutput(*probe_);
+  } else if (!leftRows.empty()) {
+    std::list<RowVectorPtr> leftList(leftRows.begin(), leftRows.end());
+    auto merged = TimeWindowUtil::mergeVectors(leftList, memoryPool());
+    probe_->addInput(merged);
     drainProbeOutput(*probe_);
   }
   probe_->noMoreInput();
   drainProbeOutput(*probe_);
 
   // Emission and clearing are atomic per window, as Flink's onEventTime.
+  // Erase the schedule entry while the key row is still alive, then clear
+  // the window's state; once all entries are gone the backend recycles
+  // the key row, which would leave a stale pointer in the schedule set.
+  scheduled_.erase({due.key.row(), due.windowEnd});
   leftState_->remove(due.key, ns);
   rightState_->remove(due.key, ns);
+}
+
+void WindowJoin::fastFireWindow(const DueWindow& due) {
+  const WindowEndNamespace ns(due.windowEnd);
+  auto leftRows = leftState_->get(due.key, ns);
+  auto rightRows = rightState_->get(due.key, ns);
+  if (!leftRows.empty() && !rightRows.empty()) {
+    const auto L = leftRows.size() == 1
+        ? leftRows[0]
+        : TimeWindowUtil::mergeVectors(
+              std::list<RowVectorPtr>(leftRows.begin(), leftRows.end()),
+              memoryPool());
+    const auto R = rightRows.size() == 1
+        ? rightRows[0]
+        : TimeWindowUtil::mergeVectors(
+              std::list<RowVectorPtr>(rightRows.begin(), rightRows.end()),
+              memoryPool());
+    // INNER semantics: a NULL in any key column makes the equality
+    // unsatisfiable, so null-key rows can never join - drop them instead
+    // of probing. The common case (no nulls anywhere) costs one
+    // mayHaveNulls() check per key column.
+    const auto Lf = dropNullKeys(L, node_->keyedStateSpec()->keyChannels());
+    const auto Rf =
+        dropNullKeys(R, node_->keyedStateSpec()->rightKeyChannels());
+    if (Lf != nullptr && Rf != nullptr && Lf->size() > 0 && Rf->size() > 0) {
+      const auto nl = Lf->size();
+      const auto nr = Rf->size();
+      const auto total = nl * nr;
+      // Stored rows carry a trailing $row_kind column; the join output
+      // projection is bounded by the probe plan's input widths.
+      const auto lw = node_->probe()->sources()[0]->outputType()->size();
+      const auto rw = node_->probe()->sources()[1]->outputType()->size();
+      auto leftIdx = allocateIndices(total, memoryPool());
+      auto rightIdx = allocateIndices(total, memoryPool());
+      auto* li = leftIdx->asMutable<vector_size_t>();
+      auto* ri = rightIdx->asMutable<vector_size_t>();
+      for (vector_size_t i = 0, k = 0; i < nl; ++i) {
+        for (vector_size_t j = 0; j < nr; ++j, ++k) {
+          li[k] = i;
+          ri[k] = j;
+        }
+      }
+      std::vector<VectorPtr> children(lw + rw);
+      for (vector_size_t c = 0; c < lw; ++c) {
+        children[c] = BaseVector::wrapInDictionary(
+            nullptr, leftIdx, total, Lf->childAt(c));
+      }
+      for (vector_size_t c = 0; c < rw; ++c) {
+        children[lw + c] = BaseVector::wrapInDictionary(
+            nullptr, rightIdx, total, Rf->childAt(c));
+      }
+      auto out = std::make_shared<RowVector>(
+          memoryPool(),
+          node_->outputType(),
+          BufferPtr(nullptr),
+          total,
+          std::move(children));
+      out->updateContainsLazyNotLoaded();
+      crossOutputs_.push_back(std::move(out));
+      crossOutputRows_ += total;
+      if (crossOutputs_.size() >= 64 || crossOutputRows_ >= 4096) {
+        flushCrossOutputs();
+      }
+    }
+  }
+  // Firing clears the window's state, as Flink's onEventTime does. Erase
+  // the schedule entry first, while the key row is still alive: removing
+  // the state entries lets the backend recycle the row, and a recycled
+  // pointer left in the set could suppress a future window registration.
   scheduled_.erase({due.key.row(), due.windowEnd});
+  leftState_->remove(due.key, ns);
+  rightState_->remove(due.key, ns);
+}
+
+RowVectorPtr WindowJoin::dropNullKeys(
+    const RowVectorPtr& v,
+    const std::vector<uint32_t>& chans) {
+  bool mayNull = false;
+  for (auto ch : chans) {
+    if (v->childAt(ch)->mayHaveNulls()) {
+      mayNull = true;
+      break;
+    }
+  }
+  if (!mayNull) {
+    return v;
+  }
+  std::vector<vector_size_t> keep;
+  keep.reserve(v->size());
+  for (vector_size_t row = 0; row < v->size(); ++row) {
+    bool null = false;
+    for (auto ch : chans) {
+      if (v->childAt(ch)->isNullAt(row)) {
+        null = true;
+        break;
+      }
+    }
+    if (!null) {
+      keep.push_back(row);
+    }
+  }
+  if (keep.size() == v->size()) {
+    return v;
+  }
+  if (keep.empty()) {
+    return nullptr;
+  }
+  auto indices = allocateIndices(keep.size(), memoryPool());
+  std::copy(keep.begin(), keep.end(), indices->asMutable<vector_size_t>());
+  std::vector<VectorPtr> children(v->childrenSize());
+  for (vector_size_t c = 0; c < v->childrenSize(); ++c) {
+    children[c] = BaseVector::wrapInDictionary(
+        nullptr, indices, keep.size(), v->childAt(c));
+  }
+  auto result = std::make_shared<RowVector>(
+      memoryPool(),
+      v->type(),
+      BufferPtr(nullptr),
+      keep.size(),
+      std::move(children));
+  result->updateContainsLazyNotLoaded();
+  return result;
+}
+
+void WindowJoin::flushCrossOutputs() {
+  if (crossOutputs_.empty()) {
+    return;
+  }
+  RowVectorPtr merged = crossOutputs_.size() == 1
+      ? crossOutputs_[0]
+      : TimeWindowUtil::mergeVectors(
+            std::list<RowVectorPtr>(
+                std::make_move_iterator(crossOutputs_.begin()),
+                std::make_move_iterator(crossOutputs_.end())),
+            memoryPool());
+  crossOutputs_.clear();
+  crossOutputRows_ = 0;
+  pushOutput(
+      std::make_shared<StreamRecord>(getPlanNodeId(), std::move(merged)));
 }
 
 void WindowJoin::drainProbeOutput(exec::NestedLoopJoinProbe& probe) {

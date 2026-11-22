@@ -57,6 +57,15 @@ namespace facebook::velox::stateful {
 /// streaming path, end-of-input flush for the outer join mismatches).
 class WindowJoin : public StatefulOperator {
  public:
+  // Fast path: INNER join whose probe condition is null (all equi-keys are
+  // already enforced by the keyed state buckets) skips the per-window probe
+  // state machine and emits the cross product directly via dictionary
+  // wraps, batched across windows.
+  bool fastPath_ = false;
+  std::vector<RowVectorPtr> crossOutputs_;
+  vector_size_t crossOutputRows_ = 0;
+
+ public:
   WindowJoin(
       std::unique_ptr<exec::Operator> leftInput,
       std::unique_ptr<exec::Operator> rightInput,
@@ -165,6 +174,11 @@ class WindowJoin : public StatefulOperator {
   // Joins and clears one (key, window): both sides' rows through a fresh
   // probe lifecycle, then remove the state entries and the schedule mark.
   void fireWindow(const DueWindow& due);
+  void fastFireWindow(const DueWindow& due);
+  RowVectorPtr dropNullKeys(
+      const RowVectorPtr& v,
+      const std::vector<uint32_t>& chans);
+  void flushCrossOutputs();
 
   // Drains a probe's output into the downstream stream as append-only
   // records (the join never emits retractions).
