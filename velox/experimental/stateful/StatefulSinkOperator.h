@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <glog/logging.h>
 #include "velox/experimental/stateful/StatefulOperator.h"
 #include "velox/experimental/stateful/StreamElement.h"
 

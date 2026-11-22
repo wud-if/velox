@@ -55,6 +55,17 @@ class KeyedStateBackend : public Snapshotable, public CheckpointListener {
   virtual std::shared_ptr<InternalTimerService<int64_t, TimeWindow>>
   createGroupWindowAggTimerService(
       Triggerable<int64_t, TimeWindow>* triggerable) = 0;
+
+  /// Serializes the whole backend into one checkpoint byte stream. This is
+  /// the typed plane the stateful operators' checkpoint walk collects
+  /// through StatefulOperator::snapshotState - the migration of the
+  /// pre-generic snapshot() above: byte-level checkpointing owned by the
+  /// backend, not the operator.
+  virtual std::string snapshotBytes() = 0;
+
+  /// Restores the stream written by snapshotBytes() into the states this
+  /// backend has registered; the states must be registered before the call.
+  virtual void restoreBytes(const std::string& bytes) = 0;
 };
 
 using KeyedStateBackendPtr = std::shared_ptr<KeyedStateBackend>;

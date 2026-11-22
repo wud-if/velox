@@ -1660,6 +1660,8 @@ bool NestedLoopJoinNode::isSupported(core::JoinType joinType) {
     case core::JoinType::kLeft:
     case core::JoinType::kRight:
     case core::JoinType::kFull:
+    case core::JoinType::kLeftSemiFilter:
+    case core::JoinType::kAnti:
       return true;
 
     default:

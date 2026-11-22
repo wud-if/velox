@@ -22,7 +22,9 @@ namespace facebook::velox::exec {
 namespace {
 
 bool needsProbeMismatch(core::JoinType joinType) {
-  return isLeftJoin(joinType) || isFullJoin(joinType);
+  // Left/full joins emit unmatched probe rows padded with nulls; an anti
+  // join emits the unmatched probe rows themselves.
+  return isLeftJoin(joinType) || isFullJoin(joinType) || isAntiJoin(joinType);
 }
 
 bool needsBuildMismatch(core::JoinType joinType) {
@@ -196,9 +198,50 @@ void NestedLoopJoinProbe::noMoreInput() {
   beginBuildMismatch();
 }
 
+void NestedLoopJoinProbe::resetForNextWindow(
+    const std::vector<RowVectorPtr>& buildData) {
+  // Back to the post-build baseline a bridge-fed probe holds in kRunning:
+  // the wrapped operator is driven by its owner, one complete lifecycle
+  // per window, so every per-lifecycle cursor and scratch resets here.
+  input_ = nullptr;
+  lastProbe_ = false;
+  future_ = ContinueFuture::makeEmpty();
+  noMoreInput_ = false;
+  probeRow_ = 0;
+  probeRowCount_ = 1;
+  probeRowHasMatch_ = false;
+  probeSideEmpty_ = true;
+  buildIndex_ = 0;
+  buildRow_ = 0;
+  numOutputRows_ = 0;
+  output_ = nullptr;
+  buildCopyRanges_.clear();
+  setState(ProbeOperatorState::kRunning);
+  setBuildData(buildData);
+}
+
 void NestedLoopJoinProbe::setBuildData(
     const std::vector<RowVectorPtr>& buildData) {
   buildVectors_ = std::move(buildData);
+  // Direct callers hand the build data over instead of waiting on the join
+  // bridge, so the operator takes the same kWaitForBuild -> kRunning
+  // transition isBlocked performs when the bridge delivers. Without it,
+  // end-of-input flushing (the right/full outer build mismatches) would
+  // early-return on the state check in noMoreInput.
+  if (state_ == ProbeOperatorState::kWaitForBuild) {
+    setState(ProbeOperatorState::kRunning);
+  }
+  // Track hits on build records for right and full outer joins. The
+  // bridge-driven path initializes the same state when it acquires the build
+  // data in isBlocked; direct setBuildData callers (operator-owned joins
+  // over the stateful framework) get the initialization here, so probing a
+  // right/full join cannot index into an empty buildMatched_.
+  if (needsBuildMismatch(joinType_)) {
+    buildMatched_.resize(buildVectors_->size());
+    for (auto i = 0; i < buildVectors_->size(); ++i) {
+      buildMatched_[i].resizeFill(buildVectors_.value()[i]->size(), false);
+    }
+  }
 }
 
 bool NestedLoopJoinProbe::getBuildData(ContinueFuture* future) {
@@ -345,6 +388,22 @@ bool NestedLoopJoinProbe::addToOutput() {
     // return the output vector directly. Also don't need to bother about adding
     // mismatched rows.
     if (isCrossJoin()) {
+      // Probe-only join types (left semi filter, anti) with no join
+      // condition: every probe row matches, so a semi row emits its probe
+      // row exactly once and an anti row emits nothing - no cartesian
+      // product, no mismatch emission.
+      if (isLeftSemiFilterJoin(joinType_) || isAntiJoin(joinType_)) {
+        if (isAntiJoin(joinType_)) {
+          probeRowHasMatch_ = true;
+        } else {
+          prepareOutput();
+          rawProbeOutputIndices_[numOutputRows_++] = probeRow_;
+          probeRowHasMatch_ = true;
+        }
+        buildIndex_ = buildVectors_->size();
+        buildRow_ = 0;
+        return true;
+      }
       output_ = getNextCrossProductBatch(
           currentBuild, outputType_, identityProjections_, buildProjections_);
       numOutputRows_ = output_->size();
@@ -365,6 +424,15 @@ bool NestedLoopJoinProbe::addToOutput() {
         continue;
       }
 
+      // An anti join emits nothing for a matched probe row: the match
+      // disqualifies it, and no further build rows need scanning.
+      if (isAntiJoin(joinType_)) {
+        probeRowHasMatch_ = true;
+        buildIndex_ = buildVectors_->size();
+        buildRow_ = 0;
+        return true;
+      }
+
       addOutputRow(i);
       ++numOutputRows_;
       probeRowHasMatch_ = true;
@@ -374,6 +442,15 @@ bool NestedLoopJoinProbe::addToOutput() {
       // build records to add and which to skip.
       if (needsBuildMismatch(joinType_)) {
         buildMatched_[buildIndex_].setValid(i, true);
+      }
+
+      // A left semi filter emits each probe row at most once: the first
+      // match short-circuits the scan of the remaining build rows.
+      if (isLeftSemiFilterJoin(joinType_)) {
+        copyBuildValues(currentBuild);
+        buildIndex_ = buildVectors_->size();
+        buildRow_ = 0;
+        return true;
       }
 
       // If the buffer is full, save state and produce it as output.
@@ -390,8 +467,8 @@ bool NestedLoopJoinProbe::addToOutput() {
     buildRow_ = 0;
   }
 
-  // Check if the current probed row needs to be added as a mismatch (for left
-  // and full outer joins).
+  // Check if the current probed row needs to be added as a mismatch (for
+  // left and full outer joins, and anti joins - an unmatched probe row).
   checkProbeMismatchRow();
 
   // Signals that all input has been generated for the probeRow and build
@@ -646,6 +723,21 @@ void NestedLoopJoinProbe::finishProbeInput() {
 
 void NestedLoopJoinProbe::beginBuildMismatch() {
   VELOX_CHECK(needsBuildMismatch(joinType_));
+
+  // An operator-owned probe runs one private build per lifecycle - there
+  // are no peer probe operators by construction - so the last-probe
+  // election short-circuits here instead of consulting the task's driver
+  // registry (which the stateful chain does not populate). The bounds
+  // update mirrors what the peer-merged path does after merging: the
+  // build-mismatch read below depends on the validity bounds.
+  if (operatorOwned_) {
+    lastProbe_ = true;
+    VELOX_CHECK_EQ(buildIndex_, 0);
+    for (auto& matched : buildMatched_) {
+      matched.updateBounds();
+    }
+    return;
+  }
 
   // Check the state of peer operators. Only the last driver (operator) running
   // this code will survive and move on to process build mismatches.

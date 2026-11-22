@@ -421,11 +421,17 @@ TEST_F(
       std::make_shared<StreamRecord>("input", batch({100, 1001, 1200, 2501})));
   watermarkAssigner.advance();
 
+  // Batch emission: the whole input batch is emitted as ONE record
+  // followed by ONE trailing watermark (the maximum of the batch). The
+  // previous per-record slicing emitted interleaved 1-row records and
+  // per-change watermarks; the batch form preserves the downstream
+  // window-operator contract (all records before the watermark that
+  // closes their windows).
   EXPECT_EQ(
-      (std::vector<std::string>{"record", "watermark", "record", "watermark"}),
+      (std::vector<std::string>{"record", "watermark"}),
       spyPtr->events());
-  EXPECT_EQ((std::vector<vector_size_t>{2, 2}), spyPtr->recordSizes());
-  EXPECT_EQ((std::vector<int64_t>{1001, 2501}), spyPtr->watermarks());
+  EXPECT_EQ((std::vector<vector_size_t>{4}), spyPtr->recordSizes());
+  EXPECT_EQ((std::vector<int64_t>{2501}), spyPtr->watermarks());
 }
 
 TEST_F(WatermarkGeneratorTest, watermarkAssignerDoesNotRepeatWatermark) {

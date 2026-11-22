@@ -38,6 +38,37 @@ class VoidNamespaceSerializer : public TypeSerializer<VoidNamespace> {
   }
 };
 
+/// Serializes WindowEndNamespace: the payload is the 8-byte little-endian
+/// window end, mirroring Flink's Long namespace serializer.
+class WindowEndNamespaceSerializer : public TypeSerializer<WindowEndNamespace> {
+ public:
+  std::string schemaId() const override {
+    return "window-end:i64";
+  }
+
+  std::string serialize(const WindowEndNamespace& ns) override {
+    std::string payload;
+    payload.reserve(sizeof(int64_t));
+    for (size_t i = 0; i < sizeof(int64_t); ++i) {
+      payload.push_back(static_cast<char>((ns.windowEnd() >> (8 * i)) & 0xFF));
+    }
+    return payload;
+  }
+
+  WindowEndNamespace deserialize(std::string_view str) override {
+    VELOX_CHECK_EQ(
+        str.size(),
+        sizeof(int64_t),
+        "Corrupt window-end namespace payload: expected 8 bytes");
+    int64_t windowEnd = 0;
+    for (size_t i = 0; i < sizeof(int64_t); ++i) {
+      windowEnd |= static_cast<int64_t>(static_cast<uint8_t>(str[i]))
+          << (8 * i);
+    }
+    return WindowEndNamespace(windowEnd);
+  }
+};
+
 /// Compile-time binding of a namespace type to its serializer, in the
 /// shape of TypeTraits: the primary template is undefined, so a namespace
 /// type without a specialization fails to compile where a handle
@@ -49,6 +80,13 @@ template <>
 struct NamespaceSerializerTraits<VoidNamespace> {
   static std::shared_ptr<TypeSerializer<VoidNamespace>> create() {
     return std::make_shared<VoidNamespaceSerializer>();
+  }
+};
+
+template <>
+struct NamespaceSerializerTraits<WindowEndNamespace> {
+  static std::shared_ptr<TypeSerializer<WindowEndNamespace>> create() {
+    return std::make_shared<WindowEndNamespaceSerializer>();
   }
 };
 

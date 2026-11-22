@@ -85,6 +85,24 @@ class NestedLoopJoinProbe : public Operator {
 
   void noMoreInput() override;
 
+  /// Rewinds the per-lifecycle state so this same instance runs one more
+  /// complete join lifecycle over 'buildData': the stateful window join
+  /// drives one private build per window through the operator it wraps,
+  /// instead of constructing (and memory-pool-registering) a fresh probe
+  /// per window. The caller guarantees the previous lifecycle drained
+  /// (getOutput returned nullptr after end-of-input). The join condition
+  /// and the projections stay compiled from the plan node.
+  void resetForNextWindow(const std::vector<RowVectorPtr>& buildData);
+
+  /// Marks this probe as operator-owned: the build data arrives directly
+  /// through setBuildData/resetForNextWindow and belongs to this single
+  /// probe, so the right/full build-mismatch flush skips the multi-driver
+  /// peer election (the stateful chain runs one probe per window with no
+  /// peer operators by construction).
+  void markOperatorOwned() {
+    operatorOwned_ = true;
+  }
+
   BlockingReason isBlocked(ContinueFuture* future) override;
 
   bool isFinished() override {
@@ -362,6 +380,10 @@ class NestedLoopJoinProbe : public Operator {
   // Stores the ranges of build values to be copied to the output vector (we
   // batch them and copy once, instead of copying them row-by-row).
   std::vector<BaseVector::CopyRange> buildCopyRanges_;
+
+  // Whether this probe is driven by an owning operator (the stateful window
+  // join) instead of a driver pipeline; see markOperatorOwned().
+  bool operatorOwned_{false};
 
   // List of output projections from the build side. Note that the list of
   // projections from the probe side is available at `identityProjections_`.

@@ -221,6 +221,11 @@ add_executable(velox_stateful_state_backend_test StateBackendTest.cpp)
 
 add_test(velox_stateful_state_backend_test velox_stateful_state_backend_test)
 
+add_executable(velox_stateful_group_aggregator_test GroupAggregatorTest.cpp)
+
+add_test(velox_stateful_group_aggregator_test
+         velox_stateful_group_aggregator_test)
+
 target_link_libraries(
   velox_stateful_state_backend_test
   velox_stateful_exec
@@ -234,6 +239,48 @@ target_link_libraries(
   velox_exec_test_lib
   velox_exec
   velox_aggregates
+  velox_core
+  velox_common_base
+  GTest::gtest
+  GTest::gtest_main)
+
+target_link_libraries(
+  velox_stateful_group_aggregator_test
+  velox_stateful_exec
+  velox_stateful_agg
+  velox_stateful_join
+  velox_stateful_rank
+  velox_stateful_state
+  velox_stateful_window
+  velox_stateful_udf
+  velox_functions_flink_aggregates
+  velox_vector_test_lib
+  velox_exec_test_lib
+  velox_exec
+  velox_aggregates
+  velox_core
+  velox_common_base
+  GTest::gtest
+  GTest::gtest_main)
+
+add_executable(velox_stateful_window_join_test WindowJoinTest.cpp)
+
+add_test(velox_stateful_window_join_test velox_stateful_window_join_test)
+
+target_link_libraries(
+  velox_stateful_window_join_test
+  velox_stateful_exec
+  velox_stateful_agg
+  velox_stateful_join
+  velox_stateful_rank
+  velox_stateful_state
+  velox_stateful_window
+  velox_stateful_udf
+  velox_vector_test_lib
+  velox_exec_test_lib
+  velox_exec
+  velox_aggregates
+  velox_functions_spark
   velox_core
   velox_common_base
   GTest::gtest

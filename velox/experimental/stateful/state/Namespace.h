@@ -56,4 +56,31 @@ class VoidNamespace : public Namespace {
   }
 };
 
+/// Namespace of the window join state: the second addressing dimension is
+/// the window end (epoch millis), exactly the namespace Flink's
+/// WindowJoinOperator uses (WindowListState over a Long namespace). Two
+/// namespaces are equal iff their window ends are equal; the hash mixes the
+/// window end into the (K, N) composite hash of StateMap.
+class WindowEndNamespace : public Namespace {
+ public:
+  explicit WindowEndNamespace(int64_t windowEnd) : windowEnd_(windowEnd) {}
+
+  int64_t windowEnd() const {
+    return windowEnd_;
+  }
+
+  bool equals(const Namespace& other) const override {
+    auto* otherWindowEnd = dynamic_cast<const WindowEndNamespace*>(&other);
+    return otherWindowEnd != nullptr &&
+        otherWindowEnd->windowEnd_ == windowEnd_;
+  }
+
+  uint64_t hash() const override {
+    return static_cast<uint64_t>(windowEnd_) * 0x9E3779B97F4A7C15ULL;
+  }
+
+ private:
+  const int64_t windowEnd_;
+};
+
 } // namespace facebook::velox::stateful

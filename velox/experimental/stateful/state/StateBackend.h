@@ -15,12 +15,16 @@
  */
 #pragma once
 
+#include "velox/common/memory/MemoryPool.h"
 #include "velox/common/serialization/Serializable.h"
 #include "velox/experimental/stateful/state/KeyedStateBackend.h"
 
 namespace facebook::velox::stateful {
 
 class KeyedStateBackendParameters;
+class KeyedStateSpec;
+template <typename K>
+class HeapKeyedStateBackend;
 
 // This class is relevant to Flink org.apache.flink.runtime.state.StateBackend.
 class StateBackend : public ISerializable {
@@ -31,6 +35,21 @@ class StateBackend : public ISerializable {
   virtual std::string getName() const = 0;
 
   virtual std::shared_ptr<KeyedStateBackend> createKeyedStateBackend() = 0;
+
+  /// Creates one keyed operator's typed backend, dispatched on this
+  /// backend's declared type: heap builds the HeapKeyedStateBackend, a
+  /// declared type with no engine behind it fails here, at operator
+  /// initialization, instead of silently producing a heap backend. K is
+  /// the operator's key type (a StateKey subclass) - only the operator
+  /// can name it, so this entry is a template and cannot be virtual (a
+  /// virtual function cannot be a template); the pre-generic
+  /// createKeyedStateBackend() above stays until the RocksDB backend has
+  /// a typed creation path. Defined out-of-line in HeapKeyedStateBackend.h,
+  /// where the return type is complete.
+  template <typename K>
+  std::unique_ptr<HeapKeyedStateBackend<K>> createKeyedStateBackend(
+      const KeyedStateSpec& spec,
+      memory::MemoryPool* pool) const;
 
   /// The parameters this state backend was built from. The keyed
   /// operators' initializeStateBackend reads the key-group configuration

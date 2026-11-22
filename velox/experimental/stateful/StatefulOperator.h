@@ -97,6 +97,17 @@ class StatefulOperator {
   /// operator can name).
   virtual void initializeStateBackend(StateBackend* stateBackend);
 
+  /// The keyed state backend this operator owns, type-erased for the
+  /// checkpoint walk: snapshotState collects its bytes into the task's
+  /// checkpoint records and restoreState routes them back. Operators with
+  /// keyed state override this together with initializeStateBackend() -
+  /// the backend is created typed there (only the operator can name the
+  /// key type) and is exposed here erased. Null for operators without
+  /// keyed state.
+  virtual KeyedStateBackend* ownedKeyedStateBackend() const {
+    return nullptr;
+  }
+
   std::vector<std::string> snapshotState(int64_t checkpointId);
 
   void restoreState(const std::vector<std::string>& checkpointRecords);
@@ -180,6 +191,15 @@ class StatefulOperator {
   bool sink_;
   bool sourceEmpty_ = true;
   std::unique_ptr<CombinedWatermarkStatus> combinedWatermarkStatus_;
+
+ protected:
+  /// Returns the combined (minimum) watermark across all inputs.
+  int64_t getCombinedWatermark() const {
+    return combinedWatermarkStatus_
+        ? combinedWatermarkStatus_->getCombinedWatermark()
+        : -1;
+  }
+
   StreamOperatorStateHandlerPtr stateHandler_;
   static std::shared_ptr<JniCaller> jniCaller_;
 };

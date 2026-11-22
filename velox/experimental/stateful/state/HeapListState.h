@@ -122,6 +122,26 @@ class HeapListState : public ListState<K, N, T> {
     return nsSerializer_->schemaId();
   }
 
+  /// Read-only visitation of every (key, namespace) entry, across all key
+  /// groups of this state. Iterates the same copy-on-write snapshot as the
+  /// checkpoint path, so it is safe against concurrent writes. Operators
+  /// with state-derived indexes (e.g. the window join due index) use this
+  /// to rebuild them after a backend restore without persisting the index.
+  template <typename F>
+  void forEachEntry(F&& fn) const {
+    for (uint32_t bucket = 0; bucket < stateTable_->numKeyGroups(); ++bucket) {
+      const auto keyGroup = stateTable_->startKeyGroup() + bucket;
+      auto& map = stateTable_->stateMapForKeyGroup(keyGroup);
+      auto snapshot = map.createSnapshot();
+      for (const auto& head : snapshot.heads) {
+        for (auto entry = head; entry != nullptr; entry = entry->next_) {
+          fn(entry->key_, entry->namespace_);
+        }
+      }
+      map.releaseSnapshot(snapshot.version);
+    }
+  }
+
   std::string valueSchemaId() const override {
     return "list<" + elementSerializer_->schemaId() + ">";
   }
