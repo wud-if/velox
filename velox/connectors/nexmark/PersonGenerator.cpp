@@ -88,6 +88,18 @@ RowVectorPtr PersonGenerator::nextPersonBatch(
         static_cast<Event::Type>(eventTypeVector.valueAt(i));
     if (eventType != Event::Type::PERSON) {
       personVector->setNull(i, true);
+      // Children of null structs can still be walked slot-by-slot by
+      // vector transforms (e.g. the arrow export evaluates every slot of
+      // every child regardless of the parent nullness); leave zeroed
+      // values instead of uninitialized pool memory.
+    idVector->setNull(i, true);
+    nameVector->setNull(i, true);
+    emailAddressVector->setNull(i, true);
+    creditCardVector->setNull(i, true);
+    cityVector->setNull(i, true);
+    stateVector->setNull(i, true);
+    dateTimeVector->setNull(i, true);
+    extraVector->setNull(i, true);
       continue;
     }
 
