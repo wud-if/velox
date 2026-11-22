@@ -42,13 +42,13 @@ RowVectorPtr BidGenerator::nextBidBatch(
       // vector transforms (e.g. the arrow export evaluates every slot of
       // every child regardless of the parent nullness); leave zeroed
       // values instead of uninitialized pool memory.
-    auctionVector->setNull(i, true);
-    bidderVector->setNull(i, true);
-    priceVector->setNull(i, true);
-    channelVector->setNull(i, true);
-    urlVector->setNull(i, true);
-    dateTimeVector->setNull(i, true);
-    extraVector->setNull(i, true);
+      auctionVector->setNull(i, true);
+      bidderVector->setNull(i, true);
+      priceVector->setNull(i, true);
+      channelVector->setNull(i, true);
+      urlVector->setNull(i, true);
+      dateTimeVector->setNull(i, true);
+      extraVector->setNull(i, true);
       continue;
     }
 
