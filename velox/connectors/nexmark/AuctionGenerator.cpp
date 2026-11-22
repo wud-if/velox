@@ -28,6 +28,17 @@ RowVectorPtr AuctionGenerator::nextAuctionBatch(
     const NexmarkGeneratorConfig& config,
     memory::MemoryPool* pool) {
   auto auctionVector = Auction::createVector(rows, pool);
+  // Zero-fill every child value buffer once: slots under null-parent
+  // rows are never written by the loop below, yet vector transforms may
+  // walk every slot regardless of parent nullness (e.g. the arrow C-data
+  // export calls Timestamp::toMicros on all child slots); stale pool
+  // memory there reads as garbage. One bulk memset per batch is far
+  // cheaper than per-slot writes and leaves every untouched slot a
+  // readable default value.
+  for (auto& child : auctionVector->children()) {
+    std::memset(
+        child->values()->asMutable<uint8_t>(), 0, child->values()->size());
+  }
   auto idVector = auctionVector->childAt(0)->asFlatVector<int64_t>();
   auto itemNameVector = auctionVector->childAt(1)->asFlatVector<StringView>();
   auto descriptionVector =
@@ -44,20 +55,6 @@ RowVectorPtr AuctionGenerator::nextAuctionBatch(
     auto eventType = static_cast<Event::Type>(eventTypeVector.valueAt(i));
     if (Event::Type::AUCTION != eventType) {
       auctionVector->setNull(i, true);
-      // Children of null structs can still be walked slot-by-slot by
-      // vector transforms (e.g. the arrow export evaluates every slot of
-      // every child regardless of the parent nullness); leave zeroed
-      // values instead of uninitialized pool memory.
-      idVector->setNull(i, true);
-      itemNameVector->setNull(i, true);
-      descriptionVector->setNull(i, true);
-      initialBidVector->setNull(i, true);
-      reserveVector->setNull(i, true);
-      dateTimeVector->setNull(i, true);
-      expiresVector->setNull(i, true);
-      sellerVector->setNull(i, true);
-      categoryVector->setNull(i, true);
-      extraVector->setNull(i, true);
       continue;
     }
 
