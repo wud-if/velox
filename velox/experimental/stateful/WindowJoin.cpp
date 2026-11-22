@@ -361,13 +361,8 @@ void WindowJoin::fireWindow(const DueWindow& due) {
   // the wrapped probe's state so the same instance serves every window:
   // one memory pool, one compiled join condition.
   probe_->resetForNextWindow(rightRows);
-  if (leftRows.size() == 1) {
-    probe_->addInput(leftRows[0]);
-    drainProbeOutput(*probe_);
-  } else if (!leftRows.empty()) {
-    std::list<RowVectorPtr> leftList(leftRows.begin(), leftRows.end());
-    auto merged = TimeWindowUtil::mergeVectors(leftList, memoryPool());
-    probe_->addInput(merged);
+  for (const auto& leftRow : leftRows) {
+    probe_->addInput(leftRow);
     drainProbeOutput(*probe_);
   }
   probe_->noMoreInput();

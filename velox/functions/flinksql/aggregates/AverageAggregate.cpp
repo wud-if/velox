@@ -255,9 +255,8 @@ void registerAverageAggregate(
               VELOX_NYI();
             }
             case TypeKind::REAL:
-              return std::
-                  make_unique<AverageAggregateBase<float, double, float>>(
-                      resultType);
+              return std::make_unique<
+                  AverageAggregateBase<float, double, float>>(resultType);
             case TypeKind::DOUBLE:
               return std::make_unique<
                   AverageAggregateBase<double, double, double>>(resultType);
