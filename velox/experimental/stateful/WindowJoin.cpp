@@ -256,8 +256,6 @@ void WindowJoin::fileRecord(
   keySelector->probe(inputVector);
   const auto perRowKeys = keySelector->keys();
 
-  // The window-end column arrives as TIMESTAMP(3) (velox Timestamp) or
-  // BIGINT depending on the bridge path; read epoch millis from either.
   const auto windowEndChild = inputVector->childAt(windowEndIndex).get();
   const auto windowEndBigint = windowEndChild->asFlatVector<int64_t>();
   const auto windowEndTimestamp = windowEndBigint == nullptr
@@ -268,33 +266,80 @@ void WindowJoin::fileRecord(
       "Window join needs a BIGINT or TIMESTAMP window-end column, got {}",
       windowEndChild->type()->toString());
   const auto numRows = inputVector->size();
-  for (vector_size_t row = 0; row < numRows; ++row) {
-    const auto windowEnd = windowEndBigint != nullptr
-        ? windowEndBigint->valueAt(row)
-        : windowEndTimestamp->valueAt(row).toMillis();
-    // Lateness first, as in Flink: a late row is dropped silently, ahead of
-    // any other check.
+
+  // Pre-read all window-end values (sequential access, local buffer - no
+  // class member to avoid layout changes that break ODR with the planner).
+  std::vector<int64_t> windowEnds(numRows);
+  if (windowEndBigint != nullptr) {
+    const auto* rawValues = windowEndBigint->rawValues();
+    std::memcpy(windowEnds.data(), rawValues, numRows * sizeof(int64_t));
+  } else {
+    for (vector_size_t i = 0; i < numRows; ++i) {
+      windowEnds[i] = windowEndTimestamp->valueAt(i).toMillis();
+    }
+  }
+
+  // Batch processing: detect runs of consecutive rows with the same
+  // (key, windowEnd) and process each run with ONE dictionary view and
+  // ONE state add. The input is pre-grouped by key (keyed exchange),
+  // so same-key rows are adjacent.
+  vector_size_t runStart = 0;
+  while (runStart < numRows) {
+    const auto windowEnd = windowEnds[runStart];
     if (TimeWindowUtil::isWindowFired(
             windowEnd, lastCombinedWatermark_, shiftTimeZone_)) {
       ++*lateRecordsDropped;
+      ++runStart;
       continue;
     }
-    // Accumulate rows (INSERT or UPDATE_AFTER, as in Flink
-    // RowDataUtil.isAccumulateMsg) take the add path below. Retraction rows
-    // (UPDATE_BEFORE or DELETE) fail loud: window join cannot handle a
-    // retraction input stream.
     if (rowKinds != nullptr &&
-        rowKinds->valueAt(row) != static_cast<int8_t>(RowKind::INSERT) &&
-        rowKinds->valueAt(row) != static_cast<int8_t>(RowKind::UPDATE_AFTER)) {
+        rowKinds->valueAt(runStart) != static_cast<int8_t>(RowKind::INSERT) &&
+        rowKinds->valueAt(runStart) !=
+            static_cast<int8_t>(RowKind::UPDATE_AFTER)) {
       VELOX_USER_FAIL(
           "WindowJoin received a retraction row (UPDATE_BEFORE or DELETE); "
           "window join cannot handle retraction input");
     }
+    vector_size_t runEnd = runStart + 1;
+    while (runEnd < numRows && windowEnds[runEnd] == windowEnd &&
+           perRowKeys[runStart].hash() == perRowKeys[runEnd].hash()) {
+      if (rowKinds != nullptr &&
+          rowKinds->valueAt(runEnd) != static_cast<int8_t>(RowKind::INSERT) &&
+          rowKinds->valueAt(runEnd) !=
+              static_cast<int8_t>(RowKind::UPDATE_AFTER)) {
+        VELOX_USER_FAIL(
+            "WindowJoin received a retraction row (UPDATE_BEFORE or DELETE); "
+            "window join cannot handle retraction input");
+      }
+      ++runEnd;
+    }
+    const auto runSize = runEnd - runStart;
+    auto indices = allocateIndices(runSize, memoryPool());
+    auto* rawIndices = indices->asMutable<vector_size_t>();
+    if (runSize == 1) {
+      rawIndices[0] = runStart;
+    } else {
+      for (vector_size_t i = 0; i < runSize; ++i) {
+        rawIndices[i] = runStart + i;
+      }
+    }
+    auto runView = std::make_shared<RowVector>(
+        memoryPool(),
+        inputVector->type(),
+        BufferPtr(nullptr),
+        runSize,
+        std::vector<VectorPtr>(inputVector->childrenSize()));
+    for (vector_size_t c = 0; c < inputVector->childrenSize(); ++c) {
+      runView->childAt(c) = BaseVector::wrapInDictionary(
+          nullptr, indices, runSize, inputVector->childAt(c));
+    }
+    runView->updateContainsLazyNotLoaded();
     state->add(
-        perRowKeys[row],
+        perRowKeys[runStart],
         WindowEndNamespace(windowEnd),
-        copyRow(inputVector, row));
-    registerDueWindow(perRowKeys[row], windowEnd);
+        std::move(runView));
+    registerDueWindow(perRowKeys[runStart], windowEnd);
+    runStart = runEnd;
   }
 }
 
@@ -361,9 +406,20 @@ void WindowJoin::fireWindow(const DueWindow& due) {
   // the wrapped probe's state so the same instance serves every window:
   // one memory pool, one compiled join condition.
   probe_->resetForNextWindow(rightRows);
-  for (const auto& leftRow : leftRows) {
-    probe_->addInput(leftRow);
-    drainProbeOutput(*probe_);
+  // Split multi-row stored vectors back to individual rows for the probe:
+  // the NestedLoopJoinProbe's per-input lifecycle produces output batches
+  // per input, and UT tests assert on that batching shape.
+  for (const auto& leftVec : leftRows) {
+    const auto vecRows = leftVec->size();
+    if (vecRows == 1) {
+      probe_->addInput(leftVec);
+      drainProbeOutput(*probe_);
+    } else {
+      for (vector_size_t row = 0; row < vecRows; ++row) {
+        probe_->addInput(copyRow(leftVec, row));
+        drainProbeOutput(*probe_);
+      }
+    }
   }
   probe_->noMoreInput();
   drainProbeOutput(*probe_);
